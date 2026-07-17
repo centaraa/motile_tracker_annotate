@@ -1,6 +1,7 @@
 import napari
 import numpy as np
 import pandas as pd
+from funtracks.user_actions import UserUpdateNodesAttrs
 from matplotlib.colors import to_rgba
 from napari.utils import DirectLabelColormap
 from qtpy.QtCore import (
@@ -10,7 +11,6 @@ from qtpy.QtCore import (
     QTimer,
 )
 from qtpy.QtGui import QColor, QKeyEvent, QMouseEvent, QPen
-from funtracks.user_actions import UserUpdateNodesAttrs
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
@@ -210,13 +210,13 @@ class CustomTableWidget(QTableWidget):
 
         # Allow parent class to handle other events
         super().keyPressEvent(event)
-    
+
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         index = self.indexAt(event.pos())
         if index.isValid():
             item = self.item(index.row(), index.column())
             if item is not None and (item.flags() & Qt.ItemIsEditable):
-                self.edit(index)          # force-start editing, bypassing pressedIndex check
+                self.edit(index)  # force-start editing, bypassing pressedIndex check
                 event.accept()
                 return
         super().mouseDoubleClickEvent(event)
@@ -494,7 +494,9 @@ class ColoredTableWidget(QWidget):
                     elif self._is_manual_annotation_column(column):
                         value_type = self._manual_annotation_cols[column]["value_type"]
                         if value_type == "bool":
-                            item.setCheckState(Qt.Checked if self._parse_bool(value) else Qt.Unchecked)
+                            item.setCheckState(
+                                Qt.Checked if self._parse_bool(value) else Qt.Unchecked
+                            )
                             flags |= Qt.ItemIsUserCheckable
                         else:
                             try:
@@ -502,7 +504,7 @@ class ColoredTableWidget(QWidget):
                             except (TypeError, ValueError):
                                 text_val = "0"
                             item.setText(text_val)
-                            flags |=  Qt.ItemIsEditable
+                            flags |= Qt.ItemIsEditable
 
                     else:
                         item.setText(str(value))
@@ -784,7 +786,9 @@ class ColoredTableWidget(QWidget):
                 QMessageBox.warning(self, "Invalid value", "Please enter an integer.")
                 self._syncing = True
                 try:
-                    current = self.tracks_viewer.tracks.get_node_attr(node_id, feature_key)
+                    current = self.tracks_viewer.tracks.get_node_attr(
+                        node_id, feature_key
+                    )
                     item.setText(str(int(current) if current is not None else 0))
                 finally:
                     self._syncing = False
