@@ -397,7 +397,7 @@ def get_features_from_tracks(
             if feature["feature_type"] == "edge":
                 continue
             name = feature.get("display_name", key)
-            if feature["value_type"] in ("float", "int"):
+            if feature["value_type"] in ("float", "int", "bool"):
                 if feature["num_values"] > 1:
                     value_names = feature.get("value_names", None)
                     for i in range(feature["num_values"]):
