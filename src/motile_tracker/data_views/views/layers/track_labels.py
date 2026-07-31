@@ -5,6 +5,7 @@ import warnings
 from typing import TYPE_CHECKING
 
 import napari
+from napari.utils.colormaps import colormap as _cmap_mod
 import numpy as np
 from funtracks.exceptions import InvalidActionError
 from funtracks.user_actions import UserUpdateSegmentation
@@ -32,7 +33,25 @@ if TYPE_CHECKING:
 
     from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
 
-import numpy as np
+# napari 0.7.1 + NumPy 2.x: DirectLabelColormap._selection_as_minimum_dtype casts
+# the raw selected-label ID into the palette's (often uint8) texture dtype before
+# mapping it. For node IDs > 255 that raises OverflowError. Widen the input so the
+# value is preserved; the direct-colormap mapping itself is value-based.
+_orig_sel_min_dtype = _cmap_mod.DirectLabelColormap._selection_as_minimum_dtype
+
+def _safe_selection_as_minimum_dtype(self, dtype):
+    try:
+        return _orig_sel_min_dtype(self, dtype)
+    except (OverflowError, ValueError):
+        return int(
+            _cmap_mod._cast_labels_data_to_texture_dtype_direct(
+                np.int64(self.selection), self
+            )
+        )
+
+_cmap_mod.DirectLabelColormap._selection_as_minimum_dtype = (
+    _safe_selection_as_minimum_dtype
+)
 
 def _as_int32(seg):
     """Ensure the segmentation is int32 so large node IDs don't overflow
