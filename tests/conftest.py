@@ -163,7 +163,7 @@ def graph_2d() -> td.graph.GraphView:
             {"source_id": 4, "target_id": 5, "iou": 1.0, "solution": True},
         ]
     )
-    graph._update_metadata(segmentation_shape=(5, 100, 100))
+    graph._update_metadata(shape=(5, 100, 100))
     return graph
 
 
@@ -198,7 +198,7 @@ def graph_3d() -> td.graph.GraphView:
             {"source_id": 1, "target_id": 3, "solution": True},
         ]
     )
-    graph._update_metadata(segmentation_shape=(2, 100, 100, 100))
+    graph._update_metadata(shape=(2, 100, 100, 100))
     return graph
 
 
@@ -286,7 +286,7 @@ def graph_3d_with_division() -> td.graph.GraphView:
             {"source_id": 2, "target_id": 4, "solution": True},
         ]
     )
-    graph._update_metadata(segmentation_shape=(5, 100, 100, 100))
+    graph._update_metadata(shape=(5, 100, 100, 100))
     return graph
 
 
@@ -314,6 +314,14 @@ def solution_tracks_2d_without_segmentation(
 ) -> SolutionTracks:
     """Return a SolutionTracks object wrapping graph_2d_without_segmentation."""
     return SolutionTracks(graph=graph_2d_without_segmentation, ndim=3, time_attr="t")
+
+
+@pytest.fixture
+def solution_tracks_3d_without_segmentation(
+    graph_3d_without_segmentation,
+) -> SolutionTracks:
+    """Return a SolutionTracks object wrapping graph_3d_without_segmentation."""
+    return SolutionTracks(graph=graph_3d_without_segmentation, ndim=4, time_attr="t")
 
 
 @pytest.fixture
