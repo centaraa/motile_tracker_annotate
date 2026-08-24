@@ -11,6 +11,7 @@ from funtracks.user_actions import UserUpdateSegmentation
 from napari.layers import Labels
 from napari.utils import DirectLabelColormap
 from napari.utils.action_manager import action_manager
+from napari.utils.colormaps import colormap as _cmap_mod
 from napari.utils.notifications import show_info
 
 from motile_tracker.data_views.keybindings_config import (
@@ -31,6 +32,47 @@ if TYPE_CHECKING:
     from napari.utils.events import Event
 
     from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
+
+# napari 0.7.1 + NumPy 2.x: DirectLabelColormap._selection_as_minimum_dtype casts
+# the raw selected-label ID into the palette's (often uint8) texture dtype before
+# mapping it. For node IDs > 255 that raises OverflowError. Widen the input so the
+# value is preserved; the direct-colormap mapping itself is value-based.
+_orig_sel_min_dtype = _cmap_mod.DirectLabelColormap._selection_as_minimum_dtype
+
+
+def _safe_selection_as_minimum_dtype(self, dtype):
+    try:
+        return _orig_sel_min_dtype(self, dtype)
+    except (OverflowError, ValueError):
+        return int(
+            _cmap_mod._cast_labels_data_to_texture_dtype_direct(
+                np.int64(self.selection), self
+            )
+        )
+
+
+_cmap_mod.DirectLabelColormap._selection_as_minimum_dtype = (
+    _safe_selection_as_minimum_dtype
+)
+
+
+def _as_int32(seg):
+    """Ensure the segmentation is int32 so large node IDs don't overflow
+    napari's Labels dtype. Rebuilds a lazy tracksdata GraphArrayView with an
+    int32 render buffer; casts a materialized array as a fallback."""
+    if seg is None or getattr(seg, "dtype", None) == np.dtype(np.int32):
+        return seg
+    if hasattr(seg, "graph") and hasattr(seg, "_attr_key"):  # GraphArrayView
+        return type(seg)(
+            seg.graph,
+            seg._attr_key,
+            offset=getattr(seg, "_offset", 0),
+            shape=seg.original_shape,
+            chunk_shape=seg.chunk_shape,
+            buffer_cache_size=seg.buffer_cache_size,
+            dtype=np.int32,
+        )
+    return np.asarray(seg).astype(np.int32, copy=False)
 
 
 def new_label(layer: TrackLabels):
@@ -88,7 +130,7 @@ class TrackLabels(ContourLabels):
         colormap = self._get_colormap()
 
         super().__init__(
-            data=data,
+            data=_as_int32(data),
             name=name,
             opacity=opacity,
             colormap=colormap,
@@ -336,7 +378,7 @@ class TrackLabels(ContourLabels):
 
     def _refresh(self):
         """Refresh the data in the labels layer"""
-        self.data = self.tracks_viewer.tracks.segmentation
+        self.data = _as_int32(self.tracks_viewer.tracks.segmentation)
         self.colormap = self._get_colormap()
         self.refresh()
 

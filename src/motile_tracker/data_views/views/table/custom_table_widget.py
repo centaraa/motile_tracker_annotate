@@ -3,6 +3,7 @@ import contextlib
 import napari
 import numpy as np
 import pandas as pd
+from funtracks.user_actions import UserUpdateNodesAttrs
 from napari.utils import DirectLabelColormap
 from qtpy.QtCore import (
     QAbstractTableModel,
@@ -11,11 +12,17 @@ from qtpy.QtCore import (
     QModelIndex,
     Qt,
     QTimer,
+    Signal,
 )
 from qtpy.QtGui import QColor, QKeyEvent, QMouseEvent, QPen
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -33,6 +40,31 @@ from motile_tracker.data_views.views.tree_view.tree_widget_utils import (
 )
 from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
 
+# Qt.CheckState.Checked as a plain int, so the comparison works the same on
+# PyQt5, PyQt6 and PySide (where the enum type differs).
+CHECKED = 2
+
+
+def parse_bool(value) -> bool:
+    """Interpret a stored feature value as a boolean."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if value is None:
+        return False
+    if isinstance(value, (int, np.integer)):
+        return int(value) != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
+def is_checked(state) -> bool:
+    """True if a Qt check state (enum member or int) means Checked."""
+    raw = getattr(state, "value", state)
+    try:
+        return int(raw) == CHECKED
+    except (TypeError, ValueError):
+        return False
+
 
 class TrackTableModel(QAbstractTableModel):
     """Lazy table model backing the tracks table.
@@ -43,7 +75,15 @@ class TrackTableModel(QAbstractTableModel):
     regardless of the total node count (a ``QTableWidget`` would instead create
     one ``QTableWidgetItem`` per cell, which blows up memory and freezes the UI
     for large datasets).
+
+    Columns registered as manual annotation columns are editable: ``bool``
+    features are exposed as check boxes, ``int`` features as editable numbers.
+    Edits are written into the numpy column and announced via
+    ``annotation_edited`` so the widget can persist them on the tracks.
     """
+
+    #: node id, feature key, new value
+    annotation_edited = Signal(int, str, object)
 
     def __init__(self, parent=None, decimals: int = 3):
         super().__init__(parent)
@@ -53,13 +93,28 @@ class TrackTableModel(QAbstractTableModel):
         self._decimals = decimals
         self._bg: list[QColor] = []
         self._fg: list[QColor] = []
+        self._manual_cols: dict[str, dict[str, str]] = {}
 
-    def set_table(self, table: dict[str, np.ndarray], colormap) -> None:
-        """Replace the table contents and precompute per-row colors."""
+    def set_table(
+        self,
+        table: dict[str, np.ndarray],
+        colormap,
+        manual_cols: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        """Replace the table contents and precompute per-row colors.
+
+        Args:
+            table (dict[str, np.ndarray]): one numpy array per column.
+            colormap: colormap mapping node ids to colors, or None.
+            manual_cols (dict[str, dict[str, str]] | None): manual annotation
+                columns, keyed by displayed column name, each holding the
+                feature ``key`` and its ``value_type`` ('bool' or 'int').
+        """
         self.beginResetModel()
         self._table = table
         self._columns = list(table.keys())
         self._nrows = len(next(iter(table.values()))) if table else 0
+        self._manual_cols = dict(manual_cols) if manual_cols else {}
 
         # Precompute one background/foreground color per row (O(rows), cheap;
         # no per-cell widget objects are created).
@@ -106,10 +161,55 @@ class TrackTableModel(QAbstractTableModel):
             return str(int(number))
         return f"{number:.{self._decimals}f}"
 
+    def manual_spec(self, column: int) -> dict[str, str] | None:
+        """Return the manual annotation spec of a column, or None.
+
+        Args:
+            column (int): the column index.
+
+        Returns:
+            dict[str, str] | None: the feature ``key`` and ``value_type`` of the
+                manual annotation column, or None for regular columns.
+        """
+        if column < 0 or column >= len(self._columns):
+            return None
+        return self._manual_cols.get(self._columns[column])
+
+    def node_id(self, row: int) -> int | None:
+        """Return the node id displayed in the given row, if any.
+
+        Args:
+            row (int): the row index.
+
+        Returns:
+            int | None: the node id, or None if it cannot be determined.
+        """
+        ids = self._table.get("ID")
+        if ids is None or row < 0 or row >= len(ids):
+            return None
+        try:
+            return int(ids[row])
+        except (TypeError, ValueError):
+            return None
+
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
         row, col = index.row(), index.column()
+        spec = self.manual_spec(col)
+        if spec is not None:
+            value = self._table[self._columns[col]][row]
+            if spec["value_type"] == "bool":
+                if role == Qt.CheckStateRole:
+                    return Qt.Checked if parse_bool(value) else Qt.Unchecked
+                if role in (Qt.DisplayRole, Qt.EditRole):
+                    # the check box carries the value, no text next to it
+                    return ""
+            elif role == Qt.EditRole:
+                try:
+                    return int(float(value))
+                except (TypeError, ValueError):
+                    return 0
         if role == Qt.DisplayRole:
             return self._format(self._table[self._columns[col]][row])
         if role == Qt.BackgroundRole:
@@ -121,7 +221,55 @@ class TrackTableModel(QAbstractTableModel):
     def flags(self, index):
         if not index.isValid():
             return Qt.NoItemFlags
-        return Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        item_flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        spec = self.manual_spec(index.column())
+        if spec is not None:
+            if spec["value_type"] == "bool":
+                item_flags |= Qt.ItemIsUserCheckable
+            else:
+                item_flags |= Qt.ItemIsEditable
+        return item_flags
+
+    def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
+        """Store an edited manual annotation value and announce the change.
+
+        Only manual annotation columns are writable. The numpy column is updated
+        copy-on-write (the dataframe may hand out read-only views), and
+        ``annotation_edited`` is emitted so the widget can persist the value on
+        the tracks.
+        """
+        if not index.isValid():
+            return False
+        spec = self.manual_spec(index.column())
+        if spec is None:
+            return False
+
+        if spec["value_type"] == "bool":
+            if role != Qt.CheckStateRole:
+                return False
+            new_value = is_checked(value)
+        else:
+            if role != Qt.EditRole:
+                return False
+            try:
+                new_value = int(float(value))
+            except (TypeError, ValueError):
+                return False
+
+        node_id = self.node_id(index.row())
+        if node_id is None:
+            return False
+
+        column = self._columns[index.column()]
+        col_arr = self._table[column]
+        if not col_arr.flags.writeable:
+            col_arr = col_arr.copy()
+            self._table[column] = col_arr
+        col_arr[index.row()] = new_value
+
+        self.dataChanged.emit(index, index, [role, Qt.DisplayRole])
+        self.annotation_edited.emit(node_id, spec["key"], new_value)
+        return True
 
 
 class NoSelectionHighlightDelegate(QStyledItemDelegate):
@@ -150,6 +298,44 @@ class NoSelectionHighlightDelegate(QStyledItemDelegate):
             painter.drawRect(opt.rect.adjusted(1, 1, -2, -2))
 
 
+class AnnotationDelegate(NoSelectionHighlightDelegate):
+    """Adds an integer editor for manual annotation columns.
+
+    Keeps the custom row-color painting of NoSelectionHighlightDelegate, and
+    provides a spin box (instead of a free text field) for int annotation
+    columns, so invalid input cannot reach the tracks in the first place.
+    """
+
+    def _is_int_annotation(self, index) -> bool:
+        model = index.model()
+        spec = model.manual_spec(index.column()) if model is not None else None
+        return spec is not None and spec["value_type"] == "int"
+
+    def createEditor(self, parent, option, index):
+        if not self._is_int_annotation(index):
+            return super().createEditor(parent, option, index)
+        editor = QSpinBox(parent)
+        editor.setRange(-2147483648, 2147483647)
+        editor.setFrame(False)
+        return editor
+
+    def setEditorData(self, editor, index):
+        if isinstance(editor, QSpinBox):
+            try:
+                editor.setValue(int(index.data(Qt.EditRole)))
+            except (TypeError, ValueError):
+                editor.setValue(0)
+            return
+        super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QSpinBox):
+            editor.interpretText()
+            model.setData(index, editor.value(), Qt.EditRole)
+            return
+        super().setModelData(editor, model, index)
+
+
 class CustomTableWidget(QTableView):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -158,6 +344,7 @@ class CustomTableWidget(QTableView):
 
     def mousePressEvent(self, event: QMouseEvent):
         """Handle mouse click events and check modifiers for different behaviors:
+        - Plain click on an annotation check box: toggle it.
         - Plain click: single selection, toggle if already selected
         - Shift: append to selection.
         - Ctrl/CMD: center node, should not affect selection.
@@ -183,8 +370,26 @@ class CustomTableWidget(QTableView):
         ctrl = modifiers & Qt.ControlModifier
         shift = modifiers & Qt.ShiftModifier
 
+        model = self.model()
+
+        # Plain click on a manual annotation check box toggles it
+        if (
+            not ctrl
+            and not shift
+            and model is not None
+            and bool(model.flags(index) & Qt.ItemIsUserCheckable)
+        ):
+            checked = is_checked(model.data(index, Qt.CheckStateRole))
+            model.setData(
+                index,
+                Qt.Unchecked if checked else Qt.Checked,
+                Qt.CheckStateRole,
+            )
+            event.accept()
+            return
+
         sel_model = self.selectionModel()
-        model_index = self.model().index(row, 0)
+        model_index = model.index(row, 0)
 
         if ctrl:
             self.parent().center_node(model_index)
@@ -276,6 +481,19 @@ class CustomTableWidget(QTableView):
         # Allow parent class to handle other events
         super().keyPressEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        index = self.indexAt(event.pos())
+        model = self.model()
+        if (
+            index.isValid()
+            and model is not None
+            and bool(model.flags(index) & Qt.ItemIsEditable)
+        ):
+            self.edit(index)  # force-start editing, bypassing pressedIndex check
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
 
 class ColoredTableWidget(QWidget):
     """Customized table widget with colored rows based on label colors in a napari Labels layer"""
@@ -289,30 +507,32 @@ class ColoredTableWidget(QWidget):
         )  # make sure tracks_viewer initializes/updates the track df
         self.tracks_viewer.table_widget_present = True
         self.tracks_viewer.tracks_updated.connect(self.update_data)
-
-        self._table = {}
-        self._id_to_row: dict[int, int] = {}
-        self.ascending = False  # for choosing whether to sort ascending or descending
-        self._syncing = False
-
         self._table_widget = CustomTableWidget()
         self._model = TrackTableModel(self._table_widget)
         self._table_widget.setModel(self._model)
+        self.special_selection = []
+        self.ascending = False  # for choosing whether to sort ascending or descending
+        self._syncing = False
 
-        # Custom delegate: preserve per-row background color and draw the cyan
-        # selection border (set once; the model handles formatting/colors).
-        self._table_widget.setItemDelegate(
-            NoSelectionHighlightDelegate(self._table_widget)
-        )
-
+        self._table: dict[str, np.ndarray] = {}
+        self.colormap = None
+        self._id_to_row: dict[int, int] = {}
+        self._manual_annotation_cols = {}
         self.update_data()
+
+        add_col_btn = QPushButton("Add Annotation Column")
+        add_col_btn.clicked.connect(self._add_annotation_column_dialog)
+
+        controls_layout = QHBoxLayout()
+        controls_layout.addWidget(add_col_btn)
+        controls_layout.addStretch()
 
         # Connect to single click in the header to sort the table.
         self._table_widget.horizontalHeader().sectionClicked.connect(self._sort_table)
 
         # Instruction label to explain mouse and keyboard functions.
         label = QLabel(
-            "Use left mouse click to select and center a label. Use Ctrl/CMD to center a node, Shift to append to selection. Use mouse drag to select a range."
+            "Use left mouse click to select and center a label. Use Ctrl/CMD to center a node, Shift to append to selection. Use mouse drag to select a range. Annotation columns are editable: click a check box, double click a number."
         )
         label.setWordWrap(True)
         font = label.font()
@@ -321,6 +541,7 @@ class ColoredTableWidget(QWidget):
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(label)
+        main_layout.addLayout(controls_layout)
         main_layout.addWidget(self._table_widget)
         self.setLayout(main_layout)
         self.setMinimumHeight(300)
@@ -353,10 +574,17 @@ class ColoredTableWidget(QWidget):
 
         self._table_widget.setSelectionMode(QAbstractItemView.MultiSelection)
         self._table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table_widget.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
+
+        delegate = AnnotationDelegate(self._table_widget)
+        self._table_widget.setItemDelegate(delegate)
 
         self._table_widget.selectionModel().selectionChanged.connect(
             self._on_selection_changed
         )
+        self._model.annotation_edited.connect(self._on_annotation_edited)
         self.tracks_viewer.node_selection_updated.connect(self._update_selected)
         self.tracks_viewer.center_node.connect(self.scroll_to_node)
 
@@ -377,6 +605,8 @@ class ColoredTableWidget(QWidget):
 
     def update_data(self, **kwargs) -> None:
         """Update the displayed data based on the tracks_df on TracksViewer"""
+        if self._syncing:
+            return
 
         columns_to_display = ["node_id"] + get_features_from_tracks(
             self.tracks_viewer.tracks, features_to_ignore=["Bounding box"]
@@ -533,6 +763,28 @@ class ColoredTableWidget(QWidget):
 
         return None
 
+    @staticmethod
+    def _build_id_to_row(table: dict[str, np.ndarray]) -> dict[int, int]:
+        """Build the node id -> row index lookup used by _find_row.
+
+        Args:
+            table (dict[str, np.ndarray]): the current table columns.
+
+        Returns:
+            dict[int, int]: node id to row index.
+        """
+        ids = table.get("ID")
+        if ids is None:
+            return {}
+
+        mapping: dict[int, int] = {}
+        for row, node_id in enumerate(ids):
+            try:
+                mapping[int(node_id)] = row
+            except (TypeError, ValueError):
+                continue
+        return mapping
+
     def set_data(
         self, df: pd.DataFrame, columns_to_display: list[str] | None = None
     ) -> None:
@@ -547,20 +799,21 @@ class ColoredTableWidget(QWidget):
 
         if columns_to_display is not None and len(df.columns) > 0:
             df = df[[col for col in columns_to_display if col in df.columns]]
-            df = df.rename(columns={"node_id": "ID"})
-        table: dict[str, np.ndarray] = {col: df[col].to_numpy() for col in df.columns}
+        df = df.rename(columns={"node_id": "ID"})
 
+        table: dict[str, np.ndarray] = {col: df[col].to_numpy() for col in df.columns}
         self._table = table
         self.colormap = self._get_colormap()
+        self._manual_annotation_cols = self._get_manual_annotation_columns()
+        self._id_to_row = self._build_id_to_row(table)
 
-        # Fast id -> row lookup for selection syncing / scrolling.
-        if "ID" in table:
-            self._id_to_row = {int(v): i for i, v in enumerate(table["ID"])}
-        else:
-            self._id_to_row = {}
-
-        # Hand the data to the lazy model (no per-cell widgets are created).
-        self._model.set_table(table, self.colormap)
+        # Hand the columns to the model (which serves cells lazily) instead of
+        # creating one item widget per cell.
+        self._syncing = True
+        try:
+            self._model.set_table(table, self.colormap, self._manual_annotation_cols)
+        finally:
+            self._syncing = False
 
     def _get_colormap(self) -> DirectLabelColormap:
         """Get a DirectLabelColormap that maps node ids to their track ids, and then
@@ -628,3 +881,142 @@ class ColoredTableWidget(QWidget):
         self.ascending = not self.ascending
 
         self.set_data(df)
+
+    def _get_manual_annotation_columns(self) -> dict[str, dict[str, str]]:
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            return {}
+
+        manual_cols: dict[str, dict[str, str]] = {}
+        for key, feature in tracks.features.items():
+            if feature.get("feature_type") != "node":
+                continue
+            if not feature.get("manual_annotation", False):
+                continue
+            value_type = feature.get("value_type")
+            if value_type not in ("bool", "int"):
+                continue
+            display_name = feature.get("display_name", key)
+            if isinstance(display_name, (list, tuple)):
+                continue
+            manual_cols[str(display_name)] = {
+                "key": str(key),
+                "value_type": str(value_type),
+            }
+        return manual_cols
+
+    def _is_manual_annotation_column(self, column_name: str) -> bool:
+        return column_name in self._manual_annotation_cols
+
+    def _parse_bool(self, value) -> bool:
+        return parse_bool(value)
+
+    def _create_manual_annotation_column(
+        self, name: str, value_type: str, default_value: int | bool
+    ) -> None:
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            return
+
+        if name in tracks.features:
+            QMessageBox.warning(
+                self, "Column exists", f"Feature '{name}' already exists."
+            )
+            return
+
+        new_feature = {
+            "feature_type": "node",
+            "value_type": value_type,
+            "num_values": 1,
+            "display_name": name,
+            "default_value": default_value,
+            "manual_annotation": True,
+        }
+        tracks.add_feature(name, new_feature)
+
+        nodes = [int(n) for n in tracks.graph.node_ids()]
+        if nodes:
+            UserUpdateNodesAttrs(
+                tracks=tracks,
+                nodes=nodes,
+                attrs={name: [default_value] * len(nodes)},
+            )
+
+        self.tracks_viewer.update_track_df(initialization=False, refresh_view=False)
+        self.update_data()
+
+    def _add_annotation_column_dialog(self) -> None:
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            QMessageBox.warning(self, "No tracks", "Load tracks first.")
+            return
+
+        name, ok = QInputDialog.getText(self, "New annotation", "Column name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+
+        value_type, ok = QInputDialog.getItem(
+            self,
+            "Type",
+            "Column type:",
+            ["bool", "int"],
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        if value_type == "bool":
+            default_text, ok = QInputDialog.getItem(
+                self,
+                "Default value",
+                "Default bool value:",
+                ["False", "True"],
+                0,
+                False,
+            )
+            if not ok:
+                return
+            default_value = default_text == "True"
+        else:
+            default_value, ok = QInputDialog.getInt(
+                self,
+                "Default value",
+                "Default int value:",
+                0,
+                -2147483648,
+                2147483647,
+                1,
+            )
+            if not ok:
+                return
+
+        self._create_manual_annotation_column(name, value_type, default_value)
+
+    def _on_annotation_edited(self, node_id: int, feature_key: str, value) -> None:
+        """Persist an annotation edit made in the table on the tracks.
+
+        Args:
+            node_id (int): the node whose attribute was edited.
+            feature_key (str): the key of the edited node feature.
+            value: the new value (bool or int).
+        """
+        if self._syncing:
+            return
+
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            return
+
+        self._syncing = True
+        try:
+            UserUpdateNodesAttrs(
+                tracks=tracks,
+                nodes=[int(node_id)],
+                attrs={feature_key: [value]},
+            )
+        finally:
+            self._syncing = False
