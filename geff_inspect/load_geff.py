@@ -1,16 +1,18 @@
 import sys
 from pathlib import Path
-import polars as pl
 
+import polars as pl
 from funtracks.import_export import import_from_geff
 
 DEFAULT = r"C:\tmp\241030_p6_saved.geff"
 
+
 def show(label, fn):
     try:
         print(label, fn())
-    except Exception as e:
-        print(label, f"<{type(e).name}: {e}>")
+    except Exception as e:  # noqa: BLE001
+        print(label, f"<{type(e).__name__}: {e}>")
+
 
 path = Path(sys.argv[1] if len(sys.argv) > 1 else DEFAULT)
 print("loading  :", path)

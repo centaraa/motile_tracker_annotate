@@ -5,13 +5,13 @@ import warnings
 from typing import TYPE_CHECKING
 
 import napari
-from napari.utils.colormaps import colormap as _cmap_mod
 import numpy as np
 from funtracks.exceptions import InvalidActionError
 from funtracks.user_actions import UserUpdateSegmentation
 from napari.layers import Labels
 from napari.utils import DirectLabelColormap
 from napari.utils.action_manager import action_manager
+from napari.utils.colormaps import colormap as _cmap_mod
 from napari.utils.notifications import show_info
 
 from motile_tracker.data_views.keybindings_config import (
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 # value is preserved; the direct-colormap mapping itself is value-based.
 _orig_sel_min_dtype = _cmap_mod.DirectLabelColormap._selection_as_minimum_dtype
 
+
 def _safe_selection_as_minimum_dtype(self, dtype):
     try:
         return _orig_sel_min_dtype(self, dtype)
@@ -49,9 +50,11 @@ def _safe_selection_as_minimum_dtype(self, dtype):
             )
         )
 
+
 _cmap_mod.DirectLabelColormap._selection_as_minimum_dtype = (
     _safe_selection_as_minimum_dtype
 )
+
 
 def _as_int32(seg):
     """Ensure the segmentation is int32 so large node IDs don't overflow
@@ -59,7 +62,7 @@ def _as_int32(seg):
     int32 render buffer; casts a materialized array as a fallback."""
     if seg is None or getattr(seg, "dtype", None) == np.dtype(np.int32):
         return seg
-    if hasattr(seg, "graph") and hasattr(seg, "_attr_key"):   # GraphArrayView
+    if hasattr(seg, "graph") and hasattr(seg, "_attr_key"):  # GraphArrayView
         return type(seg)(
             seg.graph,
             seg._attr_key,
@@ -70,6 +73,7 @@ def _as_int32(seg):
             dtype=np.int32,
         )
     return np.asarray(seg).astype(np.int32, copy=False)
+
 
 def new_label(layer: TrackLabels):
     """A function to override the default napari labels new_label function.

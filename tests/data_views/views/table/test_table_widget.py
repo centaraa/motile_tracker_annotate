@@ -430,9 +430,7 @@ def test_int_column_uses_spin_box_editor(annotation_model, qtbot):
     delegate.setModelData(editor, annotation_model, int_index)
     assert annotation_model.data(int_index, Qt.EditRole) == 13
 
-    assert not isinstance(
-        delegate.createEditor(parent, option, bool_index), QSpinBox
-    )
+    assert not isinstance(delegate.createEditor(parent, option, bool_index), QSpinBox)
 
 
 @pytest.mark.parametrize(

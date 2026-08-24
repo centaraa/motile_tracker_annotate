@@ -18,8 +18,10 @@ try:
     print("groups     :", sorted(root.group_keys()))
     for name in sorted(root.group_keys()):
         sub = root[name]
-        print(f"  {name!r} attrs={sorted(dict(sub.attrs))} groups={sorted(sub.group_keys())}")
-except Exception as e:
+        print(
+            f"  {name!r} attrs={sorted(dict(sub.attrs))} groups={sorted(sub.group_keys())}"
+        )
+except Exception as e:  # noqa: BLE001
     print("open failed:", type(e).__name__, e)
 
 print("--- geff metadata ---")
@@ -31,5 +33,5 @@ for cand in ["", "tracks", "tracks.geff"]:
         print("  extra:", list((m.extra or {}).keys()))
         print("  axes :", [a.name for a in (m.axes or [])])
         print("  props:", sorted(m.node_props_metadata))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"FAIL at {cand or '<root>'}: {type(e).__name__}: {e}")

@@ -429,7 +429,11 @@ class TreePlot(pg.PlotWidget):
         Args:
             node_id: The node ID to center on.
         """
-        if not hasattr(self, "track_df") or self.track_df is None:
+        if (
+            not hasattr(self, "track_df")
+            or self.track_df is None
+            or self.track_df.empty
+        ):
             return
         node_df = self.track_df.loc[self.track_df["node_id"] == node_id]
         if node_df.empty:

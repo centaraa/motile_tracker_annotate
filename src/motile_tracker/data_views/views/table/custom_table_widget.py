@@ -373,16 +373,20 @@ class CustomTableWidget(QTableView):
         model = self.model()
 
         # Plain click on a manual annotation check box toggles it
-        if not ctrl and not shift and model is not None:
-            if bool(model.flags(index) & Qt.ItemIsUserCheckable):
-                checked = is_checked(model.data(index, Qt.CheckStateRole))
-                model.setData(
-                    index,
-                    Qt.Unchecked if checked else Qt.Checked,
-                    Qt.CheckStateRole,
-                )
-                event.accept()
-                return
+        if (
+            not ctrl
+            and not shift
+            and model is not None
+            and bool(model.flags(index) & Qt.ItemIsUserCheckable)
+        ):
+            checked = is_checked(model.data(index, Qt.CheckStateRole))
+            model.setData(
+                index,
+                Qt.Unchecked if checked else Qt.Checked,
+                Qt.CheckStateRole,
+            )
+            event.accept()
+            return
 
         sel_model = self.selectionModel()
         model_index = model.index(row, 0)
@@ -480,11 +484,14 @@ class CustomTableWidget(QTableView):
     def mouseDoubleClickEvent(self, event: QMouseEvent):
         index = self.indexAt(event.pos())
         model = self.model()
-        if index.isValid() and model is not None:
-            if bool(model.flags(index) & Qt.ItemIsEditable):
-                self.edit(index)  # force-start editing, bypassing pressedIndex check
-                event.accept()
-                return
+        if (
+            index.isValid()
+            and model is not None
+            and bool(model.flags(index) & Qt.ItemIsEditable)
+        ):
+            self.edit(index)  # force-start editing, bypassing pressedIndex check
+            event.accept()
+            return
         super().mouseDoubleClickEvent(event)
 
 
