@@ -57,6 +57,12 @@ def _as_solution_tracks(tracks: Tracks) -> SolutionTracks:
     Objects that are already SolutionTracks (including MotileRun) are passed
     through unchanged, so a solved run keeps its solver params and identity.
 
+    Call this once per tracks object, when it enters the list. Every call on a
+    plain Tracks builds a new SolutionTracks, and each of those builds its own
+    graph_solution subgraph view of the shared root graph. Two such views do
+    not see each other's topology edits, so calling this per selection would
+    leave the row holding a view that never receives what the user edits.
+
     Constructs directly rather than using SolutionTracks.from_tracks, which in
     funtracks 2.0.x reads features.tracklet_key off the graph before building
     anything. tracklet_key only declares which attribute *would* hold the
@@ -303,13 +309,22 @@ class TracksList(QGroupBox):
             tracks_button = self.tracks_list.itemWidget(selected[0])
             name = tracks_button.name.text()
             self._update_save_name(name)
-            self.view_tracks.emit(_as_solution_tracks(tracks_button.tracks), name)
+            # Emit the row's own object. It was promoted to SolutionTracks in
+            # add_tracks, so the viewer edits exactly what save and export
+            # write. Converting here instead would hand out a second
+            # SolutionTracks with its own graph_solution view, and the row's
+            # view would never see the user's topology edits.
+            self.view_tracks.emit(tracks_button.tracks, name)
 
-    def add_tracks(self, tracks: Tracks, name: str, select=True):
+    def add_tracks(self, tracks: Tracks, name: str, select=True) -> Tracks:
         """Add tracks to the list and optionally select them. Will make a new
         row in the list UI representing the given tracks.
 
         Accepts any Tracks object directly (SolutionTracks, MotileRun, etc.).
+        A plain Tracks is promoted to SolutionTracks here, once, and it is that
+        promoted object which the row stores and every consumer receives, so
+        the viewer, the save button and the export dialog all act on a single
+        graph_solution view.
 
         Note: selecting the tracks will also emit the selection changed event on
         the list.
@@ -319,7 +334,12 @@ class TracksList(QGroupBox):
             name (str): the name of the tracks to display
             select (bool, optional): Whether or not to select the new tracks item in the
                 list (and thus display it in the tracks viewer). Defaults to True.
+
+        Returns:
+            Tracks: the object actually stored in the list, which is the
+                promoted SolutionTracks when a plain Tracks was passed in.
         """
+        tracks = _as_solution_tracks(tracks)
         item = QListWidgetItem(self.tracks_list)
         tracks_row = TracksButton(tracks, name)
         self.tracks_list.setItemWidget(item, tracks_row)
@@ -330,6 +350,7 @@ class TracksList(QGroupBox):
         tracks_row.save.clicked.connect(partial(self.save_tracks, item))
         if select:
             self.tracks_list.setCurrentRow(len(self.tracks_list) - 1)
+        return tracks
 
     def show_export_dialog(self, item: QListWidgetItem) -> None:
         """Prompt user to choose export format (csv or geff), then export the tracks
@@ -421,7 +442,9 @@ class TracksList(QGroupBox):
         if result is None:
             return
         tracks, name, source_path = result
-        self.add_tracks(tracks, name, select=True)
+        # Report the object the list actually holds, so that tracks_loaded and
+        # tracks_saved name the same object for the same tracks.
+        tracks = self.add_tracks(tracks, name, select=True)
         if source_path is not None:
             self.tracks_loaded.emit(tracks, source_path)
 
