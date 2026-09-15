@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -43,6 +44,19 @@ from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksView
 # Qt.CheckState.Checked as a plain int, so the comparison works the same on
 # PyQt5, PyQt6 and PySide (where the enum type differs).
 CHECKED = 2
+
+#: Manual text annotations are capped at this many characters, so a comment
+#: stays readable in a cell and cheap to store per node.
+MAX_COMMENT_CHARS = 150
+
+
+def comment_text(value) -> str:
+    """Render a stored text annotation for display (missing values -> '')."""
+    if value is None:
+        return ""
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return ""
+    return str(value)
 
 
 def parse_bool(value) -> bool:
@@ -77,7 +91,8 @@ class TrackTableModel(QAbstractTableModel):
     for large datasets).
 
     Columns registered as manual annotation columns are editable: ``bool``
-    features are exposed as check boxes, ``int`` features as editable numbers.
+    features are exposed as check boxes, ``int`` features as editable numbers,
+    and ``str`` features as free text comments (capped at ``MAX_COMMENT_CHARS``).
     Edits are written into the numpy column and announced via
     ``annotation_edited`` so the widget can persist them on the tracks.
     """
@@ -108,7 +123,7 @@ class TrackTableModel(QAbstractTableModel):
             colormap: colormap mapping node ids to colors, or None.
             manual_cols (dict[str, dict[str, str]] | None): manual annotation
                 columns, keyed by displayed column name, each holding the
-                feature ``key`` and its ``value_type`` ('bool' or 'int').
+                feature ``key`` and its ``value_type`` ('bool', 'int' or 'str').
         """
         self.beginResetModel()
         self._table = table
@@ -205,6 +220,11 @@ class TrackTableModel(QAbstractTableModel):
                 if role in (Qt.DisplayRole, Qt.EditRole):
                     # the check box carries the value, no text next to it
                     return ""
+            elif spec["value_type"] == "str":
+                if role in (Qt.DisplayRole, Qt.EditRole, Qt.ToolTipRole):
+                    # a full length comment does not fit a cell, so serve it as
+                    # a tooltip too
+                    return comment_text(value)
             elif role == Qt.EditRole:
                 try:
                     return int(float(value))
@@ -248,6 +268,10 @@ class TrackTableModel(QAbstractTableModel):
             if role != Qt.CheckStateRole:
                 return False
             new_value = is_checked(value)
+        elif spec["value_type"] == "str":
+            if role != Qt.EditRole:
+                return False
+            new_value = comment_text(value)[:MAX_COMMENT_CHARS]
         else:
             if role != Qt.EditRole:
                 return False
@@ -262,7 +286,12 @@ class TrackTableModel(QAbstractTableModel):
 
         column = self._columns[index.column()]
         col_arr = self._table[column]
-        if not col_arr.flags.writeable:
+        if spec["value_type"] == "str" and col_arr.dtype.kind in ("U", "S"):
+            # fixed width numpy strings ('<U12') truncate silently on assignment;
+            # object dtype holds the full comment
+            col_arr = col_arr.astype(object)
+            self._table[column] = col_arr
+        elif not col_arr.flags.writeable:
             col_arr = col_arr.copy()
             self._table[column] = col_arr
         col_arr[index.row()] = new_value
@@ -299,25 +328,32 @@ class NoSelectionHighlightDelegate(QStyledItemDelegate):
 
 
 class AnnotationDelegate(NoSelectionHighlightDelegate):
-    """Adds an integer editor for manual annotation columns.
+    """Adds editors for manual annotation columns.
 
     Keeps the custom row-color painting of NoSelectionHighlightDelegate, and
-    provides a spin box (instead of a free text field) for int annotation
-    columns, so invalid input cannot reach the tracks in the first place.
+    provides a spin box for int columns and a length limited line edit for text
+    columns, so invalid or over long input cannot reach the tracks in the first
+    place.
     """
 
-    def _is_int_annotation(self, index) -> bool:
+    def _annotation_type(self, index) -> str | None:
         model = index.model()
         spec = model.manual_spec(index.column()) if model is not None else None
-        return spec is not None and spec["value_type"] == "int"
+        return None if spec is None else spec["value_type"]
 
     def createEditor(self, parent, option, index):
-        if not self._is_int_annotation(index):
-            return super().createEditor(parent, option, index)
-        editor = QSpinBox(parent)
-        editor.setRange(-2147483648, 2147483647)
-        editor.setFrame(False)
-        return editor
+        value_type = self._annotation_type(index)
+        if value_type == "int":
+            editor = QSpinBox(parent)
+            editor.setRange(-2147483648, 2147483647)
+            editor.setFrame(False)
+            return editor
+        if value_type == "str":
+            editor = QLineEdit(parent)
+            editor.setMaxLength(MAX_COMMENT_CHARS)
+            editor.setFrame(False)
+            return editor
+        return super().createEditor(parent, option, index)
 
     def setEditorData(self, editor, index):
         if isinstance(editor, QSpinBox):
@@ -326,12 +362,18 @@ class AnnotationDelegate(NoSelectionHighlightDelegate):
             except (TypeError, ValueError):
                 editor.setValue(0)
             return
+        if isinstance(editor, QLineEdit):
+            editor.setText(comment_text(index.data(Qt.EditRole)))
+            return
         super().setEditorData(editor, index)
 
     def setModelData(self, editor, model, index):
         if isinstance(editor, QSpinBox):
             editor.interpretText()
             model.setData(index, editor.value(), Qt.EditRole)
+            return
+        if isinstance(editor, QLineEdit):
+            model.setData(index, editor.text(), Qt.EditRole)
             return
         super().setModelData(editor, model, index)
 
@@ -532,7 +574,7 @@ class ColoredTableWidget(QWidget):
 
         # Instruction label to explain mouse and keyboard functions.
         label = QLabel(
-            "Use left mouse click to select and center a label. Use Ctrl/CMD to center a node, Shift to append to selection. Use mouse drag to select a range. Annotation columns are editable: click a check box, double click a number."
+            "Use left mouse click to select and center a label. Use Ctrl/CMD to center a node, Shift to append to selection. Use mouse drag to select a range. Annotation columns are editable: click a check box, double click a number or a comment."
         )
         label.setWordWrap(True)
         font = label.font()
@@ -611,6 +653,12 @@ class ColoredTableWidget(QWidget):
         columns_to_display = ["node_id"] + get_features_from_tracks(
             self.tracks_viewer.tracks, features_to_ignore=["Bounding box"]
         )
+        # get_features_from_tracks is shared with the tree dropdown and only
+        # returns plottable (float/int/bool) features, so text annotations have
+        # to be added for the table explicitly
+        for name, spec in self._get_manual_annotation_columns().items():
+            if spec["value_type"] == "str" and name not in columns_to_display:
+                columns_to_display.append(name)
         self.set_data(self.tracks_viewer.track_df, columns_to_display)
 
     def _update_selected(self) -> None:
@@ -805,6 +853,7 @@ class ColoredTableWidget(QWidget):
         self._table = table
         self.colormap = self._get_colormap()
         self._manual_annotation_cols = self._get_manual_annotation_columns()
+        self._enforce_annotation_defaults()
         self._id_to_row = self._build_id_to_row(table)
 
         # Hand the columns to the model (which serves cells lazily) instead of
@@ -894,7 +943,7 @@ class ColoredTableWidget(QWidget):
             if not feature.get("manual_annotation", False):
                 continue
             value_type = feature.get("value_type")
-            if value_type not in ("bool", "int"):
+            if value_type not in ("bool", "int", "str"):
                 continue
             display_name = feature.get("display_name", key)
             if isinstance(display_name, (list, tuple)):
@@ -911,8 +960,46 @@ class ColoredTableWidget(QWidget):
     def _parse_bool(self, value) -> bool:
         return parse_bool(value)
 
+    def _enforce_annotation_defaults(self) -> None:
+        """Re-apply each manual annotation's chosen default to the graph schema.
+
+        ``Tracks.add_feature`` only calls ``add_node_attr_key`` when the key is
+        not on the graph yet, so after a save and reload the schema keeps the
+        default tracksdata inferred from the column dtype (``Int64`` -> -1,
+        ``Boolean`` -> False) and a newly drawn node gets that instead of the
+        chosen default. The feature dict still carries the real default, so
+        write it back onto the live schema.
+
+        ``_node_attr_schemas`` is private, hence the guards, but it returns the
+        live dict and the solution view forwards to the root graph, so one
+        assignment fixes both.
+        """
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            return
+        graph = getattr(tracks, "graph_full", None)
+        if graph is None:
+            return
+        try:
+            schemas = graph._node_attr_schemas()
+        except (AttributeError, TypeError):
+            return
+
+        casts = {"bool": bool, "int": int, "str": str}
+        for key, feature in tracks.features.items():
+            if not feature.get("manual_annotation", False):
+                continue
+            cast = casts.get(feature.get("value_type"))
+            default = feature.get("default_value")
+            schema = schemas.get(key)
+            if cast is None or default is None or schema is None:
+                continue
+            with contextlib.suppress(AttributeError, TypeError, ValueError):
+                if schema.default_value != cast(default):
+                    schema.default_value = cast(default)
+
     def _create_manual_annotation_column(
-        self, name: str, value_type: str, default_value: int | bool
+        self, name: str, value_type: str, default_value: int | bool | str
     ) -> None:
         tracks = self.tracks_viewer.tracks
         if tracks is None:
@@ -933,8 +1020,9 @@ class ColoredTableWidget(QWidget):
             "manual_annotation": True,
         }
         tracks.add_feature(name, new_feature)
+        self._enforce_annotation_defaults()
 
-        nodes = [int(n) for n in tracks.graph.node_ids()]
+        nodes = [int(n) for n in tracks.graph_solution.node_ids()]
         if nodes:
             UserUpdateNodesAttrs(
                 tracks=tracks,
@@ -962,7 +1050,7 @@ class ColoredTableWidget(QWidget):
             self,
             "Type",
             "Column type:",
-            ["bool", "int"],
+            ["bool", "int", "str"],
             0,
             False,
         )
@@ -981,6 +1069,15 @@ class ColoredTableWidget(QWidget):
             if not ok:
                 return
             default_value = default_text == "True"
+        elif value_type == "str":
+            default_value, ok = QInputDialog.getText(
+                self,
+                "Default value",
+                f"Default text (max {MAX_COMMENT_CHARS} characters):",
+            )
+            if not ok:
+                return
+            default_value = default_value[:MAX_COMMENT_CHARS]
         else:
             default_value, ok = QInputDialog.getInt(
                 self,

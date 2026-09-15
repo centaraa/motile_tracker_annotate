@@ -11,8 +11,12 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 
+import numpy as np
 from funtracks.data_model import Tracks
 from funtracks.import_export import write_to_geff
+from geff.core_io import _base_write as _geff_base_write
+
+_orig_create_props_metadata = _geff_base_write.create_props_metadata
 
 
 def is_geff(directory: Path) -> bool:
@@ -73,3 +77,25 @@ def write_geff_over(tracks: Tracks, path: Path) -> None:
             category=UserWarning,
         )
         write_to_geff(tracks, path, overwrite=is_geff(path))
+
+
+def _create_props_metadata_str_safe(identifier, prop_data, *args, **kwargs):
+    """Cast object arrays of Python strings to fixed width unicode.
+
+    geff infers ``varlength`` from ``dtype == object`` and then reads
+    ``values[0].dtype``, which fails for strings. A fixed width ``<U`` array
+    takes the normal property path and is recorded as dtype ``str``.
+    """
+    values = prop_data["values"] if isinstance(prop_data, dict) else None
+    if (
+        values is not None
+        and values.dtype == np.object_
+        and values.size > 0
+        and all(isinstance(value, str) for value in values)
+    ):
+        width = max(1, max(len(value) for value in values))
+        prop_data["values"] = values.astype(f"<U{width}")
+    return _orig_create_props_metadata(identifier, prop_data, *args, **kwargs)
+
+
+_geff_base_write.create_props_metadata = _create_props_metadata_str_safe

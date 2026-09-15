@@ -7,10 +7,12 @@ and the load_motile_run bug fix (must call MotileRun.load, not Tracks.load).
 import warnings
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from funtracks.data_model import SolutionTracks, Tracks
 from funtracks.import_export import write_to_geff
 from qtpy.QtWidgets import QDialog
+from tracksdata.nodes import Mask
 
 from motile_tracker.data_views.views_coordinator.tracks_list import (
     TracksButton,
@@ -96,8 +98,13 @@ class TestTracksListAddRemove:
     def test_view_tracks_emits_solution_tracks_for_plain_tracks(
         self, tracks_list, graph_2d
     ):
-        """The list stores plain Tracks, but view_tracks must emit a
-        SolutionTracks because the views and actions still need track IDs.
+        """A plain Tracks is promoted to SolutionTracks on the way *in*, and
+        the row keeps that one object.
+
+        The views and actions downstream of view_tracks need track IDs, so a
+        SolutionTracks has to reach them. Promoting per selection instead
+        would build a second SolutionTracks with its own graph_solution view,
+        leaving the row holding a view that never sees the user's edits.
         """
         # the fixture graph stores track ids in "track_id", so that has to be
         # declared: tracklet_attr is how a caller names an existing column
@@ -107,13 +114,15 @@ class TestTracksListAddRemove:
         tracks_list.view_tracks.connect(lambda t, n: emitted.append((t, n)))
         tracks_list.add_tracks(plain_tracks, "plain", select=True)
 
-        # stored as-is, not converted on the way in
+        # promoted on the way in, and the row keeps that same object: what the
+        # viewer edits is what save and export write
         item = tracks_list.tracks_list.item(0)
-        assert tracks_list.tracks_list.itemWidget(item).tracks is plain_tracks
+        stored = tracks_list.tracks_list.itemWidget(item).tracks
+        assert isinstance(stored, SolutionTracks)
 
         assert len(emitted) == 1
         converted = emitted[0][0]
-        assert isinstance(converted, SolutionTracks)
+        assert converted is stored
         # the conversion must carry over the attributes the views rely on
         # rather than re-deriving them
         assert converted.scale == plain_tracks.scale
@@ -123,6 +132,32 @@ class TestTracksListAddRemove:
         # the graph, not merely named by the FeatureDict
         assert converted.features.tracklet_key in converted.graph.node_attr_keys()
         assert converted.features.lineage_key in converted.graph.node_attr_keys()
+
+    def test_row_and_viewer_share_one_solution_view(self, tracks_list, graph_2d):
+        """One graph_solution view per row.
+
+        Every SolutionTracks builds its own subgraph view of the root graph.
+        Attribute writes cross between two such views, because a rustworkx
+        view shares its attribute dicts with the root by reference, but
+        topology writes do not: funtracks actions mutate the edited object's
+        graph_solution only. When the row and the viewer held different views,
+        save and export serialised the one the user never touched, and joined
+        or broken edges silently failed to reach the geff store.
+        """
+        plain_tracks = Tracks(graph_2d, ndim=3, time_attr="t", tracklet_attr="track_id")
+
+        emitted = []
+        tracks_list.view_tracks.connect(lambda t, n: emitted.append((t, n)))
+        stored = tracks_list.add_tracks(plain_tracks, "plain", select=True)
+
+        item = tracks_list.tracks_list.item(0)
+        assert tracks_list.tracks_list.itemWidget(item).tracks is stored
+
+        viewed = emitted[0][0]
+        assert viewed is stored
+        # the invariant that actually protects the save: a single view object,
+        # so an edge added through one is visible through the other
+        assert viewed.graph_solution is stored.graph_solution
 
     def test_view_tracks_computes_missing_track_ids(self, tracks_list, graph_2d):
         """Tracks with no track id column at all must come out of the
@@ -145,6 +180,36 @@ class TestTracksListAddRemove:
         converted = emitted[0][0]
         assert converted.features.tracklet_key in converted.graph.node_attr_keys()
         assert converted.features.lineage_key in converted.graph.node_attr_keys()
+
+    def test_view_tracks_segmentation_follows_edits(self, tracks_list, graph_2d):
+        """The emitted tracks must own their segmentation, not borrow the old one.
+
+        A GraphArrayView renders from, and listens to, the single graph object
+        it was built with. Handing the original view to the converted tracks
+        left it bound to the graph of the tracks in the list, so an edit made
+        through the converted tracks (painting a label) never invalidated its
+        cache: the pixels snapped back while the centroid moved.
+        """
+        plain_tracks = Tracks(graph_2d, ndim=3, time_attr="t", tracklet_attr="track_id")
+        assert plain_tracks.segmentation is not None
+
+        emitted = []
+        tracks_list.view_tracks.connect(lambda t, n: emitted.append((t, n)))
+        tracks_list.add_tracks(plain_tracks, "plain", select=True)
+        converted = emitted[0][0]
+
+        assert converted.segmentation.graph is converted.graph_solution
+
+        node = 1
+        time = converted.get_time(node)
+        assert (np.asarray(converted.segmentation[time]) == node).any()
+
+        old_mask = converted.get_mask(node)
+        converted.update_mask(
+            node, Mask(np.zeros_like(old_mask.mask), bbox=old_mask.bbox)
+        )
+
+        assert not (np.asarray(converted.segmentation[time]) == node).any()
 
     def test_view_tracks_passes_through_motile_run(self, tracks_list, motile_run):
         """A MotileRun is already a SolutionTracks, so it must be emitted
@@ -539,9 +604,13 @@ class TestTracksListLoadGeff:
         tracks_list.load_tracks()
 
         assert len(emitted) == 1
-        # tracks_loaded hands out the stored object as-is, which is a plain
-        # Tracks. Only view_tracks converts to SolutionTracks.
-        assert isinstance(emitted[0][0], Tracks)
+        # tracks_loaded hands out the object the list stores, which is the
+        # promoted SolutionTracks, so it names the same object tracks_saved
+        # will report for these tracks
+        item = tracks_list.tracks_list.item(0)
+        stored = tracks_list.tracks_list.itemWidget(item).tracks
+        assert isinstance(emitted[0][0], SolutionTracks)
+        assert emitted[0][0] is stored
         assert emitted[0][1] == geff_path
 
     def test_load_internal_tracks_bad_path_warns(self, tracks_list, tmp_path):
