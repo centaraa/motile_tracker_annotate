@@ -34,6 +34,7 @@ from motile_tracker.import_export.menus.export_dialog import ExportDialog
 from motile_tracker.import_export.menus.import_dialog import (
     ImportDialog,
 )
+from motile_tracker.mask_features import attach_mask_features
 from motile_tracker.motile.backend.motile_run import MotileRun
 
 GEFF_SUFFIX = ".geff"
@@ -340,6 +341,9 @@ class TracksList(QGroupBox):
                 promoted SolutionTracks when a plain Tracks was passed in.
         """
         tracks = _as_solution_tracks(tracks)
+        # Adopt the mask-only pipeline measurement columns, so that painting a
+        # node refreshes them instead of leaving the column default behind.
+        attach_mask_features(tracks)
         item = QListWidgetItem(self.tracks_list)
         tracks_row = TracksButton(tracks, name)
         self.tracks_list.setItemWidget(item, tracks_row)
