@@ -853,6 +853,7 @@ class ColoredTableWidget(QWidget):
         self._table = table
         self.colormap = self._get_colormap()
         self._manual_annotation_cols = self._get_manual_annotation_columns()
+        self._enforce_annotation_defaults()
         self._id_to_row = self._build_id_to_row(table)
 
         # Hand the columns to the model (which serves cells lazily) instead of
@@ -959,6 +960,44 @@ class ColoredTableWidget(QWidget):
     def _parse_bool(self, value) -> bool:
         return parse_bool(value)
 
+    def _enforce_annotation_defaults(self) -> None:
+        """Re-apply each manual annotation's chosen default to the graph schema.
+
+        ``Tracks.add_feature`` only calls ``add_node_attr_key`` when the key is
+        not on the graph yet, so after a save and reload the schema keeps the
+        default tracksdata inferred from the column dtype (``Int64`` -> -1,
+        ``Boolean`` -> False) and a newly drawn node gets that instead of the
+        chosen default. The feature dict still carries the real default, so
+        write it back onto the live schema.
+
+        ``_node_attr_schemas`` is private, hence the guards, but it returns the
+        live dict and the solution view forwards to the root graph, so one
+        assignment fixes both.
+        """
+        tracks = self.tracks_viewer.tracks
+        if tracks is None:
+            return
+        graph = getattr(tracks, "graph_full", None)
+        if graph is None:
+            return
+        try:
+            schemas = graph._node_attr_schemas()
+        except (AttributeError, TypeError):
+            return
+
+        casts = {"bool": bool, "int": int, "str": str}
+        for key, feature in tracks.features.items():
+            if not feature.get("manual_annotation", False):
+                continue
+            cast = casts.get(feature.get("value_type"))
+            default = feature.get("default_value")
+            schema = schemas.get(key)
+            if cast is None or default is None or schema is None:
+                continue
+            with contextlib.suppress(AttributeError, TypeError, ValueError):
+                if schema.default_value != cast(default):
+                    schema.default_value = cast(default)
+
     def _create_manual_annotation_column(
         self, name: str, value_type: str, default_value: int | bool | str
     ) -> None:
@@ -981,6 +1020,7 @@ class ColoredTableWidget(QWidget):
             "manual_annotation": True,
         }
         tracks.add_feature(name, new_feature)
+        self._enforce_annotation_defaults()
 
         nodes = [int(n) for n in tracks.graph_solution.node_ids()]
         if nodes:
