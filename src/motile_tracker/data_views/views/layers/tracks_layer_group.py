@@ -9,6 +9,7 @@ from napari.experimental import link_layers, unlink_layers
 from motile_tracker.data_views.views.layers.track_graph import TrackGraph
 from motile_tracker.data_views.views.layers.track_labels import TrackLabels
 from motile_tracker.data_views.views.layers.track_points import TrackPoints
+from motile_tracker.membrane.io import get_membrane
 
 if TYPE_CHECKING:
     from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
@@ -29,6 +30,7 @@ class TracksLayerGroup:
         self.tracks_layer: TrackGraph | None = None
         self.points_layer: TrackPoints | None = None
         self.seg_layer: TrackLabels | None = None
+        self.membrane_layer: napari.layers.Labels | None = None
 
     def set_tracks(self, tracks, name):
         self.remove_napari_layers()
@@ -46,6 +48,8 @@ class TracksLayerGroup:
             )
         else:
             self.seg_layer = None
+
+        self.membrane_layer = self._make_membrane_layer()
 
         if self.tracks is not None and self.tracks.graph is not None:
             self.tracks_layer = TrackGraph(
@@ -72,6 +76,28 @@ class TracksLayerGroup:
         self.remove_napari_layer(self.tracks_layer)
         self.remove_napari_layer(self.seg_layer)
         self.remove_napari_layer(self.points_layer)
+        self.remove_napari_layer(self.membrane_layer)
+
+    def _make_membrane_layer(self) -> napari.layers.Labels | None:
+        """A read-only overlay of the merged membrane labels, if the tracks have any.
+
+        Its label values are nucleus node ids, so it reuses the nuclei layer's
+        node-to-track colormap and each cell matches its nucleus' color.
+        """
+        membrane = get_membrane(self.tracks) if self.tracks is not None else None
+        if membrane is None:
+            return None
+        layer = napari.layers.Labels(
+            membrane,
+            name=self.name + "_membrane",
+            opacity=0.6,
+            scale=self.tracks.scale,
+        )
+        layer.contour = 1
+        layer.editable = False
+        if self.seg_layer is not None:
+            layer.colormap = self.seg_layer.colormap
+        return layer
 
     def add_napari_layers(self) -> None:
         """Add new tracking layers to the viewer"""
@@ -82,6 +108,8 @@ class TracksLayerGroup:
             self.viewer.add_layer(self.points_layer)
         if self.seg_layer is not None:
             self.viewer.add_layer(self.seg_layer)
+        if self.membrane_layer is not None:
+            self.viewer.add_layer(self.membrane_layer)
 
         # self.link_experimental_clipping_planes()
 
@@ -117,6 +145,8 @@ class TracksLayerGroup:
             self.tracks_layer._refresh()
         if self.seg_layer is not None:
             self.seg_layer._refresh()
+            if self.membrane_layer is not None:
+                self.membrane_layer.colormap = self.seg_layer.colormap
         if self.points_layer is not None:
             self.points_layer._refresh()
 
