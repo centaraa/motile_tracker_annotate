@@ -299,3 +299,65 @@ def test_close_ball_respects_spacing():
     # The same gap is 3 um wide at 0.5 um/voxel and closes with a 2 um ball.
     assert close_ball(mask, 2.0, (1.0, 1.0, 0.5))[10, 10, 12]
     assert close_ball(mask, 2.0, (1.0, 1.0, 1.0))[mask].all()  # mask kept
+
+
+def _between_cells():
+    """Three cells around a slab between them, which touches all three."""
+    shape = (10, 30, 30)
+    membrane = np.zeros(shape, dtype=np.uint32)
+    membrane[2:8, 2:14, 2:14] = 1
+    membrane[2:8, 2:14, 16:28] = 2
+    membrane[2:8, 16:28, 2:28] = 3
+    membrane[2:8, 14:16, 2:28] = 4  # unseeded slab between the cells
+    membrane[2:8, 2:14, 14:16] = 4
+    nuclei = _box(shape, (slice(4, 6), slice(6, 9), slice(6, 9)), 10)
+    nuclei = _box(shape, (slice(4, 6), slice(6, 9), slice(20, 23)), 11, nuclei)
+    nuclei = _box(shape, (slice(4, 6), slice(20, 23), slice(12, 16)), 12, nuclei)
+    return membrane, nuclei
+
+
+def test_fragment_between_cells_is_divided_not_merged_whole():
+    membrane, nuclei = _between_cells()
+
+    res = merge_frame(membrane, nuclei, params=MembraneMergeParams(min_shared_frac=0))
+
+    slab = res.labels[membrane == 4]
+    assert set(np.unique(slab)) == {10, 11, 12}  # divided among neighbours
+    assert all(res.features[n]["membrane_n_fragments"] == 1 for n in (10, 11, 12))
+
+
+def test_ambiguous_share_zero_merges_fragment_whole():
+    membrane, nuclei = _between_cells()
+
+    res = merge_frame(
+        membrane,
+        nuclei,
+        params=MembraneMergeParams(min_shared_frac=0, ambiguous_share=0),
+    )
+
+    assert len(set(np.unique(res.labels[membrane == 4]))) == 1
+
+
+def test_fragment_mostly_on_one_cell_still_merges():
+    shape = (10, 30, 30)
+    membrane = np.zeros(shape, dtype=np.uint32)
+    membrane[2:8, 2:14, 2:14] = 1
+    membrane[2:8, 2:14, 16:28] = 2
+    membrane[2:8, 2:14, 14:16] = 3  # between 1 and 2, but ...
+    membrane[2:8, 14:20, 2:16] = 3  # ... mostly against cell 1
+    nuclei = _box(shape, (slice(4, 6), slice(6, 9), slice(6, 9)), 10)
+    nuclei = _box(shape, (slice(4, 6), slice(6, 9), slice(20, 23)), 11, nuclei)
+
+    params = MembraneMergeParams(min_shared_frac=0, fill_gaps=False)
+    res = merge_frame(membrane, nuclei, params=params)
+
+    assert res.features[10]["membrane_n_fragments"] == 2
+
+
+def test_nucleus_seeds_fill_inside_dissolved_fragment():
+    membrane, nuclei = _between_cells()
+    nuclei[4:6, 13:16, 6:9] = 10  # nucleus 10 reaches into the slab
+
+    res = merge_frame(membrane, nuclei, params=MembraneMergeParams(min_shared_frac=0))
+
+    assert (res.labels[nuclei == 10] == 10).all()

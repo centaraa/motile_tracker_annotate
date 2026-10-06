@@ -11,7 +11,11 @@ nuclei are a much more reliable signal, so they are used as seeds:
    surface_b)``: 1 means the smaller fragment is fully wrapped by the larger.
    Two groups seeded by different nuclei are never joined (cannot-link), and
    an unseeded fragment only joins a seeded group whose nucleus centroid lies
-   within ``max_dist_um`` of the fragment centroid.
+   within ``max_dist_um`` of the fragment centroid. An unseeded fragment lying
+   *between* cells (it touches several, none with at least
+   ``ambiguous_share`` of its contact with cells) is ambiguous: neither it
+   nor what it collects joins any cell, and the gap filling divides it
+   among its neighbours voxel by voxel instead of handing it whole to one.
 3. A group still holding several nuclei (under-segmentation, or a cell in
    ana-/telophase before cytokinesis) is split by a seeded watershed with the
    nuclei as markers, so every nucleus gets its own cell. The landscape is the
@@ -71,6 +75,10 @@ class MembraneMergeParams:
     """Split groups holding several nuclei; otherwise they keep a shared label."""
     merge_embedded: bool = True
     """Absorb unseeded fragments enclosed by a single seeded group."""
+    ambiguous_share: float = 0.6
+    """An unseeded fragment touching cells of several nuclei joins none of them
+    unless one has at least this share of its contact with cells; the gap
+    filling then divides it. 0 disables."""
     fill_gaps: bool = True
     """Give every unlabelled voxel inside the embryo outline its nearest cell."""
     outline: str = "closed"
@@ -255,6 +263,10 @@ def _merge_cropped(
     group_seeds = {f: set(s) for f, s in seeds.items()}
     group_members = {f: [f] for f in frag_ids}
     group_score = dict.fromkeys(frag_ids, 1.0)
+    ambiguous = {
+        f: f in _ambiguous_fragments(seeds, pairs, params.ambiguous_share)
+        for f in frag_ids
+    }
 
     def close_enough(frag: int, nucs: set[int]) -> bool:
         return any(
@@ -276,6 +288,8 @@ def _merge_cropped(
         si, sj = group_seeds[ri], group_seeds[rj]
         if si and sj and si != sj:
             continue  # cannot-link: different nuclei
+        if (ambiguous[ri] and sj) or (ambiguous[rj] and si):
+            continue  # between cells: left for the gap filling to divide
         # An unseeded group joining a seeded one must lie near its nucleus.
         if si and not sj and not all(close_enough(f, si) for f in group_members[rj]):
             continue
@@ -285,10 +299,18 @@ def _merge_cropped(
         group_seeds[ri] = si | sj
         group_members[ri] += group_members.pop(rj)
         group_score[ri] = min(group_score[ri], group_score.pop(rj), score)
+        ambiguous[ri] = ambiguous[ri] or ambiguous.pop(rj)
         del group_seeds[rj]
 
     if params.merge_embedded:
-        _absorb_embedded(uf, group_seeds, group_members, pairs, surface)
+        _absorb_embedded(
+            uf,
+            group_seeds,
+            group_members,
+            pairs,
+            surface,
+            skip={r for r, a in ambiguous.items() if a},
+        )
 
     out = np.zeros(membrane.shape, dtype=np.uint32)
     features: dict[int, dict] = {}
@@ -337,6 +359,12 @@ def _merge_cropped(
                 rec["membrane_qc"] = QC_DIVIDING
 
     if params.fill_gaps and out.any():
+        # Nuclei seed the filling too, so a nucleus reaching into a dissolved
+        # (ambiguous or unseeded) fragment keeps that part in its own cell.
+        cell_of = np.zeros(int(nuclei.max()) + 1, dtype=np.uint32)
+        for n, rec in features.items():
+            cell_of[n] = rec["membrane_id"]
+        out = np.where(out == 0, cell_of[nuclei], out)
         embryo = embryo_mask(
             membrane,
             nuclei,
@@ -353,14 +381,43 @@ def _merge_cropped(
     return MergeResult(labels=out, features=features)
 
 
-def _absorb_embedded(uf, group_seeds, group_members, pairs, surface) -> None:
+def _ambiguous_fragments(
+    seeds: dict[int, set[int]],
+    pairs: dict[tuple[int, int], float],
+    share: float,
+) -> set[int]:
+    """Unseeded fragments lying between cells of different nuclei.
+
+    For each unseeded fragment, its contact area with seeded fragments is
+    summed per nucleus set. It is ambiguous when it touches at least two and
+    the largest takes less than `share` of that contact.
+    """
+    if share <= 0:
+        return set()
+    touch: dict[int, dict[frozenset, float]] = {}
+    for (i, j), area in pairs.items():
+        for f, other in ((i, j), (j, i)):
+            if not seeds[f] and seeds[other]:
+                key = frozenset(seeds[other])
+                per = touch.setdefault(f, {})
+                per[key] = per.get(key, 0.0) + area
+    return {
+        f
+        for f, per in touch.items()
+        if len(per) > 1 and max(per.values()) < share * sum(per.values())
+    }
+
+
+def _absorb_embedded(
+    uf, group_seeds, group_members, pairs, surface, skip=frozenset()
+) -> None:
     """Merge unseeded groups enclosed by exactly one seeded group.
 
     Unseeded groups that touch each other are handled together, so a cluster
     of nucleus-free fragments inside one cell is absorbed as a whole. A
     cluster qualifies when none of its surface faces background (border faces
-    of the image are not counted as background) and all its labelled
-    neighbours belong to the same seeded group.
+    of the image are not counted as background), all its labelled neighbours
+    belong to the same seeded group, and it holds no group from `skip`.
     """
     bg = dict(surface)
     group_adj: dict[int, set[int]] = {r: set() for r in group_members}
@@ -388,7 +445,7 @@ def _absorb_embedded(uf, group_seeds, group_members, pairs, surface) -> None:
                     stack.append(nb)
         hosts = {nb for r in cluster for nb in group_adj[r] if nb not in unseeded}
         touches_bg = any(bg[f] > 1e-9 for r in cluster for f in group_members[r])
-        if len(hosts) != 1 or touches_bg:
+        if len(hosts) != 1 or touches_bg or skip.intersection(cluster):
             continue
         host = hosts.pop()
         for r in cluster:
