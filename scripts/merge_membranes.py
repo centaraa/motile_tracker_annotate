@@ -65,6 +65,12 @@ def main():
     p.add_argument("--start-frame", type=int, default=0, help="first frame index")
     p.add_argument("--max-frames", type=int, default=None, help="at most N frames")
     p.add_argument("--view", action="store_true", help="show result in napari")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="frames merged in parallel; each needs ~2-3 GB RAM",
+    )
     p.add_argument("--min-nucleus-overlap", type=float, default=0.5)
     p.add_argument("--min-shared-frac", type=float, default=0.2)
     p.add_argument("--min-contact-area", type=float, default=0.0, help="µm²")
@@ -94,7 +100,11 @@ def main():
         closing_radius_um=args.closing_radius,
         fill_embryo_holes=not args.keep_cavities,
     )
-    tracks = import_from_geff(args.geff)
+    geff = args.geff
+    # A motile run folder keeps its geff in tracks.geff; accept either.
+    if not (geff / "nodes").exists() and (geff / "tracks.geff" / "nodes").exists():
+        geff = geff / "tracks.geff"
+    tracks = import_from_geff(geff)
     membrane = read_label_file(args.membrane)
     seg_shape = tuple(tracks.segmentation.shape)
     start = args.start_frame
@@ -120,6 +130,7 @@ def main():
         max_frames=n,
         out=store,
         start_frame=start,
+        workers=args.workers,
     )
     add_membrane_features(tracks, feats)
     print("wrote", args.labels_zarr)

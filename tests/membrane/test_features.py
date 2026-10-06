@@ -134,3 +134,21 @@ def test_start_frame(solution_tracks_3d, membrane_3d, tmp_path):
     compute_membrane_features(solution_tracks_3d, membrane_3d, start_frame=1, out=store)
     assert not store[0].any()
     np.testing.assert_array_equal(store[1], merged[0])
+
+
+def test_parallel_matches_sequential(solution_tracks_3d, membrane_3d, tmp_path):
+    from motile_tracker.membrane.io import create_label_store
+
+    seq, seq_feats = compute_membrane_features(solution_tracks_3d, membrane_3d)
+    store = create_label_store(tmp_path / "p.zarr", membrane_3d.shape)
+    done = []
+    par, par_feats = compute_membrane_features(
+        solution_tracks_3d,
+        membrane_3d,
+        out=store,
+        workers=2,
+        progress=lambda i, n: done.append(i),
+    )
+    np.testing.assert_array_equal(par[...], seq)
+    assert par_feats == seq_feats
+    assert sorted(done) == [0, 1]

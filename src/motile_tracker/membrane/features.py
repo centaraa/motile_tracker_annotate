@@ -77,6 +77,7 @@ def compute_membrane_features(
     max_frames: int | None = None,
     out=None,
     start_frame: int = 0,
+    workers: int = 1,
 ) -> tuple[np.ndarray, dict[int, dict]]:
     """Merge the membrane labels of every frame onto the tracked nuclei.
 
@@ -97,6 +98,11 @@ def compute_membrane_features(
             take no disk space in zarr). Default: a new in-memory array
             holding only the processed frames, the first at index 0.
         start_frame: First frame to merge.
+        workers: Frames merged at the same time, each in its own process.
+            Frames are independent, so the result is the same as with 1. This
+            process reads the frames and writes the results; at most `workers`
+            frames are in flight at once, so memory grows by about one frame's
+            merge (~2 GB for a 107 x 594 x 616 frame) per worker.
 
     Returns:
         The merged labels (`out` if given; values are node ids) and per-node
@@ -129,21 +135,53 @@ def compute_membrane_features(
     else:
         merged, offset = out, 0
     features: dict[int, dict] = {}
-    for t in range(start_frame, stop):
-        nuclei = np.asarray(tracks.segmentation[t])
+
+    def job(t: int) -> tuple:
+        # Node ids fit in uint32, which halves what is sent to a worker.
+        nuclei = np.asarray(tracks.segmentation[t]).astype(np.uint32)
         nodes = [int(n) for n in np.unique(nuclei) if n]
-        res = merge_frame(
-            np.asarray(membrane[t]),
-            nuclei,
-            spacing=spacing,
-            params=params,
-            dividing_pairs=dividing_pairs(tracks, nodes, division_window),
-        )
-        merged[t - offset] = res.labels
-        features.update(res.features)
+        pairs = dividing_pairs(tracks, nodes, division_window)
+        return t, np.asarray(membrane[t]), nuclei, spacing, params, pairs
+
+    def collect(t: int, labels: np.ndarray, feats: dict, done: int) -> None:
+        merged[t - offset] = labels
+        features.update(feats)
         if progress is not None:
-            progress(t - start_frame, n_frames)
+            progress(done, n_frames)
+
+    frames = range(start_frame, stop)
+    if workers <= 1:
+        for done, t in enumerate(frames):
+            collect(*_merge_job(job(t)), done)
+        return merged, features
+
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+    todo = iter(frames)
+    done = 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        running = set()
+        for t in todo:
+            running.add(pool.submit(_merge_job, job(t)))
+            if len(running) < workers:
+                continue
+            finished, running = wait(running, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                collect(*fut.result(), done)
+                done += 1
+        for fut in running:
+            collect(*fut.result(), done)
+            done += 1
     return merged, features
+
+
+def _merge_job(args: tuple) -> tuple[int, np.ndarray, dict]:
+    """Merge one frame; module level so worker processes can run it."""
+    t, membrane, nuclei, spacing, params, pairs = args
+    res = merge_frame(
+        membrane, nuclei, spacing=spacing, params=params, dividing_pairs=pairs
+    )
+    return t, res.labels, res.features
 
 
 def add_membrane_features(tracks: Tracks, features: dict[int, dict]) -> None:
