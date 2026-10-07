@@ -19,6 +19,9 @@ import zarr
 MEMBRANE_ARRAY = "membrane_labels"
 MEMBRANE_NODE_PROP = "membrane_id"
 
+# The package supports zarr 2 and 3, whose array-creation APIs differ.
+_ZARR3 = int(zarr.__version__.split(".")[0]) >= 3
+
 # Tracks carry no slot for a second label volume, so the merged membrane labels
 # ride along as a plain attribute of the (promoted) tracks object the list holds.
 _TRACKS_ATTR = "_motile_membrane_labels"
@@ -101,22 +104,43 @@ def create_label_store(path: str | Path, shape, dtype=np.uint32) -> zarr.Array:
     It uses zarr format 2, like the geff stores written here, so that
     `save_membrane_labels` can copy it into a geff file by file.
     """
-    return zarr.create_array(
-        str(path),
-        shape=tuple(shape),
-        dtype=dtype,
-        chunks=_chunks(tuple(shape)),
-        fill_value=0,
-        overwrite=True,
-        zarr_format=2,
-    )
+    kwargs = {
+        "shape": tuple(shape),
+        "dtype": dtype,
+        "chunks": _chunks(tuple(shape)),
+        "fill_value": 0,
+    }
+    if _ZARR3:
+        return zarr.create_array(str(path), overwrite=True, zarr_format=2, **kwargs)
+    return zarr.open_array(str(path), mode="w", **kwargs)
+
+
+def _create_in_group(group, name: str, shape, dtype) -> zarr.Array:
+    """Create (replacing) an array `name` in `group`, with one chunk per frame."""
+    kwargs = {
+        "shape": tuple(shape),
+        "dtype": dtype,
+        "chunks": _chunks(tuple(shape)),
+        "fill_value": 0,
+        "overwrite": True,
+    }
+    if _ZARR3:
+        return group.create_array(name, **kwargs)
+    return group.create_dataset(name, **kwargs)
+
+
+def _zarr_format(node) -> int:
+    """The zarr format (2 or 3) an array or group is stored in."""
+    fmt = getattr(getattr(node, "metadata", None), "zarr_format", None)
+    return fmt if fmt is not None else getattr(node, "_version", 2)
 
 
 def _array_dir(labels) -> Path | None:
     """The directory of a zarr array kept in a local store, else None."""
     if not isinstance(labels, zarr.Array):
         return None
-    root = getattr(labels.store, "root", None)
+    # zarr 3's LocalStore calls its folder `root`, zarr 2's DirectoryStore `path`.
+    root = getattr(labels.store, "root", None) or getattr(labels.store, "path", None)
     if root is None:
         return None
     return Path(root) / labels.path
@@ -155,19 +179,12 @@ def save_membrane_labels(geff_path: str | Path, labels) -> Path:
     src = _array_dir(labels)
     if _same_array(labels, target):
         pass
-    elif src is not None and labels.metadata.zarr_format == root.metadata.zarr_format:
+    elif src is not None and _zarr_format(labels) == _zarr_format(root):
         if target.exists():
             shutil.rmtree(target)
         shutil.copytree(src, target)
     else:
-        arr = root.create_array(
-            MEMBRANE_ARRAY,
-            shape=labels.shape,
-            dtype=labels.dtype,
-            chunks=_chunks(tuple(labels.shape)),
-            fill_value=0,
-            overwrite=True,
-        )
+        arr = _create_in_group(root, MEMBRANE_ARRAY, labels.shape, labels.dtype)
         for t in range(labels.shape[0]):
             arr[t] = np.asarray(labels[t])
 
