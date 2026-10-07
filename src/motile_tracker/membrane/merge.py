@@ -319,27 +319,26 @@ def _merge_cropped(
         lut[members] = root
     groups = lut[membrane]
 
+    # Each group is handled inside its own bounding box, not the whole frame:
+    # with many cells, per-group full-frame passes dominated the run time.
+    boxes = ndimage.find_objects(groups)
     for root, nucs in group_seeds.items():
         if not nucs:
             continue  # unseeded group: background
-        region = groups == root
+        box = boxes[root - 1]
+        region = groups[box] == root
         n_frag = len(group_members[root])
         score = group_score[root]
         if len(nucs) == 1 or not params.use_watershed_split:
             label = min(nucs)
-            out[region] = label
+            out[box][region] = label
             qc = QC_OK if len(nucs) == 1 else QC_SHARED
             vol = region.sum() * voxel
             for n in nucs:
                 features[n] = _record(label, vol, n_frag, score, len(nucs), qc)
             continue
-        # Under-segmentation: seeded watershed inside the region.
-        # Flooding the distance to the nearest nucleus is a Voronoi split in µm,
-        # which does not depend on the region having a background border.
-        markers = np.where(region & np.isin(nuclei, list(nucs)), nuclei, 0)
-        dist = ndimage.distance_transform_edt(markers == 0, sampling=spacing)
-        split = watershed(dist, markers=markers, mask=region)
-        out[region] = split[region]
+        split = split_region(region, nuclei[box], nucs, spacing)
+        out[box][region] = split[region]
         for n in nucs:
             vol = (split == n).sum() * voxel
             features[n] = _record(n, vol, n_frag, score, len(nucs), QC_SPLIT)
@@ -379,6 +378,21 @@ def _merge_cropped(
             if rec["membrane_id"]:
                 rec["membrane_volume"] = volume.get(rec["membrane_id"], 0.0)
     return MergeResult(labels=out, features=features)
+
+
+def split_region(
+    region: np.ndarray, nuclei: np.ndarray, nucs: Iterable[int], spacing
+) -> np.ndarray:
+    """Divide `region` among the nuclei `nucs` lying in it (under-segmentation).
+
+    A seeded watershed on the distance to the nearest nucleus, i.e. a Voronoi
+    split in µm that does not depend on the region having a background
+    border. All markers lie in the region, so passing only the region's
+    bounding box gives exactly the result of passing the whole frame.
+    """
+    markers = np.where(region & np.isin(nuclei, list(nucs)), nuclei, 0)
+    dist = ndimage.distance_transform_edt(markers == 0, sampling=spacing)
+    return watershed(dist, markers=markers, mask=region)
 
 
 def _ambiguous_fragments(

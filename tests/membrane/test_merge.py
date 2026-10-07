@@ -361,3 +361,36 @@ def test_nucleus_seeds_fill_inside_dissolved_fragment():
     res = merge_frame(membrane, nuclei, params=MembraneMergeParams(min_shared_frac=0))
 
     assert (res.labels[nuclei == 10] == 10).all()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_split_in_bounding_box_equals_full_frame(seed):
+    """Splitting inside the region's bounding box is exactly the full split."""
+    from scipy import ndimage
+
+    from motile_tracker.membrane.merge import split_region
+
+    rng = np.random.default_rng(seed)
+    shape = (30, 60, 70)
+    # An irregular region (smoothed noise) away from the frame border, with a
+    # few small nuclei inside it.
+    noise = ndimage.gaussian_filter(rng.random(shape), 3)
+    region = noise > np.quantile(noise, 0.6)
+    region[:4] = region[:, :6] = region[:, :, -8:] = False
+    lab, _ = ndimage.label(region)
+    region = lab == (np.bincount(lab.ravel())[1:].argmax() + 1)  # largest piece
+    nuclei = np.zeros(shape, np.uint32)
+    coords = np.argwhere(region)
+    for k, (z, y, x) in enumerate(coords[rng.choice(len(coords), 5, replace=False)]):
+        nuclei[z, y, x : x + 2] = 100 + k
+    nuclei[~region] = 0
+    nucs = [int(i) for i in np.unique(nuclei) if i]
+    spacing = (2.0, 0.5, 0.5)
+
+    full = split_region(region, nuclei, nucs, spacing)
+    box = ndimage.find_objects(region.astype(np.uint8))[0]
+    cropped = np.zeros_like(full)
+    cropped[box] = split_region(region[box], nuclei[box], nucs, spacing)
+
+    np.testing.assert_array_equal(cropped, full)
+    assert set(np.unique(full[region])) == set(nucs)
