@@ -63,42 +63,6 @@ track objects in napari Labels or Points layers. For details, please read the
 
 If you are new to using motile-tracker, you can follow this [tutorial](./assets/motile-tracker_tutorial.pdf) to learn the basics.
 
-## Membrane labels
-
-Membrane segmentations are typically over- and under-segmented. Once the
-nuclei tracks are corrected, `scripts/merge_membranes.py` turns raw membrane
-labels into one cell per tracked nucleus, using only the labels (no raw
-image). Run it as the last step, after nuclei correction: later edits to the
-nuclei do not update the membrane results, so rerun it after them.
-
-```bash
-uv run python scripts/merge_membranes.py TRACKS MEMBRANE LABELS.zarr --out-geff OUT.geff --workers 8
-```
-
-- `TRACKS`: the corrected tracks, a geff store or a motile run folder.
-- `MEMBRANE`: raw membrane labels with the same shape as the nuclei
-  segmentation, as a zarr array, a tiff or a folder of one tiff per timepoint.
-- `LABELS.zarr` receives the merged labels frame by frame; `OUT.geff` gets the
-  tracks plus a copy of them. Load `OUT.geff` via "Tracks (geff)" to see a
-  read-only `<name>_membrane` overlay, coloured like the nuclei.
-
-Per frame, fragments are merged along their shared surface, never across two
-nuclei; fragments enclosed by one cell are absorbed; fragments lying between
-cells are divided among them; a label holding several nuclei (including cells
-in ana-/telophase) is split between them by distance; and every empty voxel
-inside the embryo outline goes to its nearest cell. Each node gets the
-features `membrane_id`, `membrane_volume`, `membrane_n_fragments`,
-`membrane_merge_score`, `membrane_n_nuclei` and `membrane_qc` (`ok`, `split`,
-`dividing` for sisters right after a division, `no_membrane`), which show in
-the table and are written to CSV exports.
-
-Useful options: `--start-frame`/`--max-frames` to try a range, `--view` to
-inspect the result in napari, `--keep-cavities-from FRAME` to leave enclosed
-cavities such as a blastocoel empty from FRAME on, and `--closing-radius` for
-the width of inlets the embryo outline closes. Lengths are in µm, using the
-voxel size stored with the tracks (voxels if none is stored). Each worker
-needs about 2 to 3 GB of memory. `--help` lists all options.
-
 ## Package the application into an executable and create the installer
 
 Tagging any branch will automatically trigger the deploy.yml workflow,
