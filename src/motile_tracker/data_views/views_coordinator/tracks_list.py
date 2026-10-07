@@ -35,12 +35,6 @@ from motile_tracker.import_export.menus.import_dialog import (
     ImportDialog,
 )
 from motile_tracker.mask_features import attach_mask_features
-from motile_tracker.membrane.io import (
-    get_membrane,
-    load_membrane_labels,
-    save_membrane_labels,
-    set_membrane,
-)
 from motile_tracker.motile.backend.motile_run import MotileRun
 
 GEFF_SUFFIX = ".geff"
@@ -416,9 +410,6 @@ class TracksList(QGroupBox):
             tracks.save(saved_path)
         else:
             write_geff_over(tracks, saved_path)
-            membrane = get_membrane(tracks)
-            if membrane is not None:
-                save_membrane_labels(saved_path, membrane)
         self.tracks_saved.emit(tracks, saved_path)
 
     def remove_tracks(self, item: QListWidgetItem):
@@ -457,14 +448,7 @@ class TracksList(QGroupBox):
         tracks, name, source_path = result
         # Report the object the list actually holds, so that tracks_loaded and
         # tracks_saved name the same object for the same tracks.
-        tracks = self.add_tracks(tracks, name, select=False)
-        # Attach merged membrane labels kept in the geff store before selecting,
-        # so the viewer builds the membrane overlay along with the other layers.
-        if source_path is not None and source_path.is_dir():
-            membrane = load_membrane_labels(source_path)
-            if membrane is not None:
-                set_membrane(tracks, membrane)
-        self.tracks_list.setCurrentRow(len(self.tracks_list) - 1)
+        tracks = self.add_tracks(tracks, name, select=True)
         if source_path is not None:
             self.tracks_loaded.emit(tracks, source_path)
 
