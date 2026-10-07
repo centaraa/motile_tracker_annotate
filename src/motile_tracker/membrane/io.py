@@ -10,6 +10,7 @@ array in `related_objects` each time it is called.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -88,19 +89,18 @@ def read_label_file(path: str | Path):
 
 
 def _chunks(shape: tuple[int, ...]) -> tuple[int, ...]:
-    # One frame deep, blocks of at most 32 z-slices x 256 x 256: a frame is
-    # written in one go, and napari reads only the blocks it shows.
-    return (
-        1,
-        *(
-            min(s, c)
-            for s, c in zip(shape[1:], (32, 256, 256)[-len(shape[1:]) :], strict=True)
-        ),
-    )
+    # One chunk (one file) per frame: a frame is written and read in one go,
+    # and a long movie stays at a few hundred files instead of tens of
+    # thousands, which matters on network drives.
+    return (1, *shape[1:])
 
 
 def create_label_store(path: str | Path, shape, dtype=np.uint32) -> zarr.Array:
-    """Create an empty, compressed zarr array on disk to stream merged frames into."""
+    """Create an empty, compressed zarr array on disk to stream merged frames into.
+
+    It uses zarr format 2, like the geff stores written here, so that
+    `save_membrane_labels` can copy it into a geff file by file.
+    """
     return zarr.create_array(
         str(path),
         shape=tuple(shape),
@@ -108,26 +108,39 @@ def create_label_store(path: str | Path, shape, dtype=np.uint32) -> zarr.Array:
         chunks=_chunks(tuple(shape)),
         fill_value=0,
         overwrite=True,
+        zarr_format=2,
     )
+
+
+def _array_dir(labels) -> Path | None:
+    """The directory of a zarr array kept in a local store, else None."""
+    if not isinstance(labels, zarr.Array):
+        return None
+    root = getattr(labels.store, "root", None)
+    if root is None:
+        return None
+    return Path(root) / labels.path
 
 
 def _same_array(labels, path: Path) -> bool:
     """Whether `labels` is the zarr array stored at `path`."""
-    if not isinstance(labels, zarr.Array):
+    src = _array_dir(labels)
+    if src is None or not src.exists() or not path.exists():
         return False
-    root = getattr(labels.store, "root", None)
-    if root is None:
-        return False
-    return (Path(root) / labels.path).resolve() == path.resolve()
+    try:
+        return src.samefile(path)
+    except OSError:
+        return src.resolve() == path.resolve()
 
 
 def save_membrane_labels(geff_path: str | Path, labels) -> Path:
     """Write merged labels into the geff store and register them in its metadata.
 
-    The labels are copied frame by frame, so a lazy (zarr) source never has to
-    fit in memory. If `labels` already is the array in this store (tracks
-    loaded from and saved back to the same geff), only the metadata is
-    rewritten.
+    A zarr source of the same format as the geff is copied file by file, with
+    no decompressing and recompressing; anything else is copied frame by
+    frame, so a lazy source never has to fit in memory. If `labels` already is
+    the array in this store (tracks loaded from and saved back to the same
+    geff), only the metadata is rewritten.
 
     Args:
         geff_path: A saved geff store (the directory holding `nodes`/`edges`).
@@ -138,7 +151,15 @@ def save_membrane_labels(geff_path: str | Path, labels) -> Path:
     """
     geff_path = Path(geff_path)
     root = zarr.open_group(str(geff_path), mode="a")
-    if not _same_array(labels, geff_path / MEMBRANE_ARRAY):
+    target = geff_path / MEMBRANE_ARRAY
+    src = _array_dir(labels)
+    if _same_array(labels, target):
+        pass
+    elif src is not None and labels.metadata.zarr_format == root.metadata.zarr_format:
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(src, target)
+    else:
         arr = root.create_array(
             MEMBRANE_ARRAY,
             shape=labels.shape,

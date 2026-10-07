@@ -152,3 +152,53 @@ def test_parallel_matches_sequential(solution_tracks_3d, membrane_3d, tmp_path):
     np.testing.assert_array_equal(par[...], seq)
     assert par_feats == seq_feats
     assert sorted(done) == [0, 1]
+
+
+def test_keep_cavities_from_switches_per_frame(solution_tracks_3d):
+    """A cavity inside cell 1 (t=0) is filled; the same at t=1 (cell 2) is kept."""
+    membrane = np.zeros((2, 100, 100, 100), dtype=np.uint32)
+    membrane[0, 25:76, 25:76, 25:76] = 5
+    membrane[0, 40:46, 40:46, 60:66] = 0  # cavity away from nucleus 1
+    membrane[1, 0:40, 30:70, 60:100] = 9
+    membrane[1, 15:21, 45:51, 92:98] = 0  # cavity away from nucleus 2
+
+    # A 1-voxel ball does not close the 6-voxel cavities (the default 6 would,
+    # by design: only cavities wider than the ball count as cavities).
+    from motile_tracker.membrane import MembraneMergeParams
+
+    merged, _ = compute_membrane_features(
+        solution_tracks_3d,
+        membrane,
+        params=MembraneMergeParams(closing_radius_um=1),
+        keep_cavities_from=1,
+        division_window=0,
+    )
+
+    assert merged[0, 43, 43, 63] == 1  # before the switch: filled
+    assert merged[1, 18, 48, 95] == 0  # from the switch on: kept empty
+
+
+def test_save_copies_zarr_store_file_by_file(solution_tracks_3d, membrane_3d, tmp_path):
+    from motile_tracker.membrane.io import create_label_store
+
+    store = create_label_store(tmp_path / "m.zarr", membrane_3d.shape)
+    merged, feats = compute_membrane_features(
+        solution_tracks_3d, membrane_3d, out=store
+    )
+    add_membrane_features(solution_tracks_3d, feats)
+    path = tmp_path / "out.geff"
+    write_geff_over(solution_tracks_3d, path)
+
+    save_membrane_labels(path, store)
+
+    # One chunk file per frame, copied as is.
+    src_files = sorted(f.name for f in (tmp_path / "m.zarr").iterdir())
+    assert sorted(f.name for f in (path / MEMBRANE_ARRAY).iterdir()) == src_files
+    np.testing.assert_array_equal(np.asarray(load_membrane_labels(path)), store[...])
+
+    # Saving the geff onto a new path copies its own array along.
+    loaded = load_membrane_labels(path)
+    other = tmp_path / "other.geff"
+    write_geff_over(solution_tracks_3d, other)
+    save_membrane_labels(other, loaded)
+    np.testing.assert_array_equal(np.asarray(load_membrane_labels(other)), store[...])

@@ -8,6 +8,7 @@ the table and tree view, and makes `write_to_geff` save them as node props.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
@@ -78,6 +79,7 @@ def compute_membrane_features(
     out=None,
     start_frame: int = 0,
     workers: int = 1,
+    keep_cavities_from: int | None = None,
 ) -> tuple[np.ndarray, dict[int, dict]]:
     """Merge the membrane labels of every frame onto the tracked nuclei.
 
@@ -98,6 +100,10 @@ def compute_membrane_features(
             take no disk space in zarr). Default: a new in-memory array
             holding only the processed frames, the first at index 0.
         start_frame: First frame to merge.
+        keep_cavities_from: From this frame on, enclosed cavities (e.g. a
+            forming blastocoel) are left empty instead of being filled, as with
+            `params.fill_embryo_holes=False`. Earlier frames use `params` as
+            given. Default: use `params` for every frame.
         workers: Frames merged at the same time, each in its own process.
             Frames are independent, so the result is the same as with 1. This
             process reads the frames and writes the results; at most `workers`
@@ -136,12 +142,16 @@ def compute_membrane_features(
         merged, offset = out, 0
     features: dict[int, dict] = {}
 
+    base = params or MembraneMergeParams()
+    keep = dataclasses.replace(base, fill_embryo_holes=False)
+
     def job(t: int) -> tuple:
         # Node ids fit in uint32, which halves what is sent to a worker.
         nuclei = np.asarray(tracks.segmentation[t]).astype(np.uint32)
         nodes = [int(n) for n in np.unique(nuclei) if n]
         pairs = dividing_pairs(tracks, nodes, division_window)
-        return t, np.asarray(membrane[t]), nuclei, spacing, params, pairs
+        p = keep if keep_cavities_from is not None and t >= keep_cavities_from else base
+        return t, np.asarray(membrane[t]), nuclei, spacing, p, pairs
 
     def collect(t: int, labels: np.ndarray, feats: dict, done: int) -> None:
         merged[t - offset] = labels

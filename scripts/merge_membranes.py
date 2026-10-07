@@ -85,6 +85,13 @@ def main():
         "--closing-radius", type=float, default=6.0, help="µm, ball for 'closed'"
     )
     p.add_argument("--keep-cavities", action="store_true")
+    p.add_argument(
+        "--keep-cavities-from",
+        type=int,
+        default=None,
+        metavar="FRAME",
+        help="fill enclosed cavities before FRAME, keep them empty from FRAME on",
+    )
     args = p.parse_args()
 
     params = MembraneMergeParams(
@@ -131,6 +138,7 @@ def main():
         out=store,
         start_frame=start,
         workers=args.workers,
+        keep_cavities_from=args.keep_cavities_from,
     )
     add_membrane_features(tracks, feats)
     print("wrote", args.labels_zarr)

@@ -659,6 +659,20 @@ class ColoredTableWidget(QWidget):
         for name, spec in self._get_manual_annotation_columns().items():
             if spec["value_type"] == "str" and name not in columns_to_display:
                 columns_to_display.append(name)
+        # Text features computed by a pipeline (e.g. "Membrane QC") are shown
+        # too; not being manual annotations, they stay read-only.
+        tracks = self.tracks_viewer.tracks
+        if tracks is not None:
+            for key, feature in tracks.features.items():
+                if (
+                    feature.get("feature_type") == "edge"
+                    or feature.get("value_type") != "str"
+                    or feature.get("num_values", 1) != 1
+                ):
+                    continue
+                name = feature.get("display_name", key)
+                if name not in columns_to_display:
+                    columns_to_display.append(name)
         self.set_data(self.tracks_viewer.track_df, columns_to_display)
 
     def _update_selected(self) -> None:
