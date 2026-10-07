@@ -468,3 +468,30 @@ def test_annotation_column_round_trips_to_tracks(
 
     # the edit must not leave the widget stuck in its syncing guard
     assert widget._syncing is False
+
+
+def test_pipeline_text_feature_is_shown_read_only(colored_table_widget):
+    """A str feature that is no manual annotation (e.g. membrane QC) is listed."""
+    widget, tracks_viewer = colored_table_widget
+    tracks = tracks_viewer.tracks
+    nodes = [int(n) for n in tracks.graph.node_ids()]
+    tracks.add_feature(
+        "membrane_qc",
+        {
+            "feature_type": "node",
+            "value_type": "str",
+            "num_values": 1,
+            "display_name": "Membrane QC",
+            "default_value": "",
+        },
+    )
+    tracks._set_nodes_attr(nodes, "membrane_qc", ["dividing"] * len(nodes))
+    tracks_viewer.update_track_df(initialization=False, refresh_view=False)
+
+    widget.update_data()
+
+    model = widget._table_widget.model()
+    col = _column_index(model, "Membrane QC")
+    index = model.index(0, col)
+    assert model.data(index, Qt.DisplayRole) == "dividing"
+    assert not model.flags(index) & Qt.ItemIsEditable
