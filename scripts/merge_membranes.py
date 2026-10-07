@@ -7,6 +7,7 @@ Usage:
         [--min-contact-area 0] [--max-dist inf] [--min-cell-volume 0]
         [--division-window 1] [--no-split] [--no-embedded] [--no-fill]
         [--outline closed|convex_hull] [--closing-radius 6] [--keep-cavities]
+        [--raw RAW --spacing Z,Y,X]
 
 MEMBRANE is a zarr array, a tiff, or a folder of one tiff per timepoint.
 Merged frames are streamed into LABELS.zarr one at a time, so memory use stays
@@ -16,6 +17,15 @@ features, plus a copy of the merged labels inside the geff store.
 
 All lengths are in µm, using the voxel size stored with the tracks (voxels if
 the geff stores none).
+
+With --raw (the raw membrane image, same layout as MEMBRANE), each merged
+frame is refined on it: boundaries between touching cells move onto the
+membrane signal where it is clear, with the spindle of mitotic cells
+suppressed; stray pieces of cells are dropped; from --keep-cavities-from on,
+the blank inside of the embryo is removed from the cells; and nodes get
+membrane_boundary_signal. --spacing gives the physical voxel size for these
+steps (default: the tracks'). Best used on Cellpose masks segmented from the
+output of export_membrane_blend.py.
 """
 
 import argparse
@@ -92,6 +102,8 @@ def main():
         metavar="FRAME",
         help="fill enclosed cavities before FRAME, keep them empty from FRAME on",
     )
+    p.add_argument("--raw", type=Path, default=None, help="raw membrane image")
+    p.add_argument("--spacing", default=None, help="z,y,x in um for --raw steps")
     args = p.parse_args()
 
     params = MembraneMergeParams(
@@ -123,6 +135,12 @@ def main():
         f"frames {start}..{start + n - 1}"
     )
     print(f"voxel size (t, [z], y, x): {tracks.scale}")
+    raw = read_label_file(args.raw) if args.raw is not None else None
+    raw_spacing = (
+        tuple(float(v) for v in args.spacing.split(",")) if args.spacing else None
+    )
+    if raw is not None:
+        print(f"refining on raw image {tuple(raw.shape)}, voxel {raw_spacing} um")
 
     store = create_label_store(args.labels_zarr, seg_shape)
     t0 = time.time()
@@ -139,10 +157,21 @@ def main():
         start_frame=start,
         workers=args.workers,
         keep_cavities_from=args.keep_cavities_from,
+        raw=raw,
+        raw_spacing=raw_spacing,
     )
     add_membrane_features(tracks, feats)
     print("wrote", args.labels_zarr)
     print("QC:", dict(Counter(f["membrane_qc"] for f in feats.values())))
+    signal = [
+        f["membrane_boundary_signal"]
+        for f in feats.values()
+        if not np.isnan(f.get("membrane_boundary_signal", np.nan))
+    ]
+    if signal:
+        print(
+            f"boundary signal: median {np.median(signal):.3f} over {len(signal)} cells"
+        )
 
     if args.out_geff is not None:
         write_geff_over(tracks, args.out_geff)

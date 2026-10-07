@@ -99,6 +99,37 @@ the width of inlets the embryo outline closes. Lengths are in µm, using the
 voxel size stored with the tracks (voxels if none is stored). Each worker
 needs about 2 to 3 GB of memory. `--help` lists all options.
 
+### Using the raw membrane image
+
+The membrane channel also shows the mitotic spindle, which is often brighter
+than the membranes. With the raw image, boundaries can be placed on the
+membranes while ignoring the spindle, in three steps:
+
+1. Write a Cellpose input in which membranes are boosted and spindle fibres
+   suppressed (a Hessian sheet filter; around the chromatin of dividing cells,
+   taken from the tracks, the signal is blanked):
+
+   ```bash
+   uv run python scripts/export_membrane_blend.py TRACKS RAW BLEND_DIR --spacing 1,0.26,0.26 --workers 8
+   ```
+
+2. Segment `BLEND_DIR` with Cellpose (e.g. DestiNuc's `cell_seg.py` with
+   `paths.membrane_dir` set to it).
+3. Merge the masks and refine the result on the raw image:
+
+   ```bash
+   uv run python scripts/merge_membranes.py TRACKS MASKS LABELS.zarr --raw RAW --spacing 1,0.26,0.26 --keep-cavities-from FRAME --out-geff OUT.geff --workers 8
+   ```
+
+With `--raw`, every boundary between two cells may move inside a band around
+its position onto the membrane signal, decided voxel by voxel; where there is
+no clear membrane it stays where the merge put it. Stray pieces of cells are
+dropped, from `--keep-cavities-from` on the blank inside of the embryo (the
+cavity) is removed from the cells, and each node gets
+`membrane_boundary_signal`, the mean membrane signal on its boundaries (low
+values mark cells whose boundaries are guesses). `--spacing` is the physical
+voxel size (z, y, x in µm) for these steps. Each worker needs about 4 GB.
+
 ## Package the application into an executable and create the installer
 
 Tagging any branch will automatically trigger the deploy.yml workflow,

@@ -15,6 +15,14 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .merge import MembraneMergeParams, merge_frame
+from .refine import (
+    RefineParams,
+    boundary_signal,
+    drop_islands,
+    raw_cavity,
+    refine_boundaries,
+)
+from .score import ScoreParams, embryo_from_raw, membrane_score, mitotic_nodes
 
 if TYPE_CHECKING:
     from funtracks.data_model import Tracks
@@ -38,6 +46,13 @@ MEMBRANE_FEATURES: dict[str, Feature] = {
     "membrane_merge_score": _feature("float", "Membrane Merge Score", float("nan")),
     "membrane_n_nuclei": _feature("int", "Membrane Nuclei", 0),
     "membrane_qc": _feature("str", "Membrane QC", ""),
+}
+
+# Only computed when the raw membrane image is given (see `raw` below).
+RAW_FEATURES: dict[str, Feature] = {
+    "membrane_boundary_signal": _feature(
+        "float", "Membrane Boundary Signal", float("nan")
+    ),
 }
 
 
@@ -80,6 +95,10 @@ def compute_membrane_features(
     start_frame: int = 0,
     workers: int = 1,
     keep_cavities_from: int | None = None,
+    raw=None,
+    raw_spacing=None,
+    score_params: ScoreParams | None = None,
+    refine_params: RefineParams | None = None,
 ) -> tuple[np.ndarray, dict[int, dict]]:
     """Merge the membrane labels of every frame onto the tracked nuclei.
 
@@ -108,7 +127,20 @@ def compute_membrane_features(
             Frames are independent, so the result is the same as with 1. This
             process reads the frames and writes the results; at most `workers`
             frames are in flight at once, so memory grows by about one frame's
-            merge (~2 GB for a 107 x 594 x 616 frame) per worker.
+            merge (~2 GB for a 107 x 594 x 616 frame) per worker; with
+            `raw`, about 4 GB.
+        raw: The raw membrane image (t, z, y, x), same shape, read frame by
+            frame. When given, each merged frame is refined on it: the
+            boundaries between touching cells move onto the membrane signal
+            where it is clear (`refine.refine_boundaries`), with the spindle
+            of mitotic cells suppressed (`score.membrane_score`); stray
+            pieces of cells are dropped; from `keep_cavities_from` on, the
+            blank inside of the embryo (the cavity) is removed from the cells;
+            and each node gets `membrane_boundary_signal`.
+        raw_spacing: Physical voxel size (z, y, x) in um for the raw-image
+            steps. Default: the tracks' scale. The merge itself always uses
+            the tracks' scale.
+        score_params, refine_params: Parameters of those steps.
 
     Returns:
         The merged labels (`out` if given; values are node ids) and per-node
@@ -131,6 +163,16 @@ def compute_membrane_features(
         )
     scale = tracks.scale or [1.0] * len(seg_shape)
     spacing = tuple(float(s) for s in scale[1:])
+    if raw is not None and (
+        tuple(raw.shape)[1:] != seg_shape[1:] or raw.shape[0] < stop
+    ):
+        raise ValueError(
+            f"Raw image has shape {tuple(raw.shape)}, the nuclei segmentation "
+            f"{seg_shape}."
+        )
+    raw_spacing = tuple(float(s) for s in (raw_spacing or spacing))
+    score_params = score_params or ScoreParams()
+    refine_params = refine_params or RefineParams()
 
     if out is None:
         # Labels are node ids; uint32 halves memory over uint64 for long movies.
@@ -150,8 +192,22 @@ def compute_membrane_features(
         nuclei = np.asarray(tracks.segmentation[t]).astype(np.uint32)
         nodes = [int(n) for n in np.unique(nuclei) if n]
         pairs = dividing_pairs(tracks, nodes, division_window)
-        p = keep if keep_cavities_from is not None and t >= keep_cavities_from else base
-        return t, np.asarray(membrane[t]), nuclei, spacing, p, pairs
+        late = keep_cavities_from is not None and t >= keep_cavities_from
+        p = keep if late else base
+        refine = None
+        if raw is not None:
+            mitotic = mitotic_nodes(
+                tracks, nodes, score_params.mitotic_before, score_params.mitotic_after
+            )
+            refine = (
+                np.asarray(raw[t]),
+                raw_spacing,
+                mitotic,
+                score_params,
+                refine_params,
+                late,
+            )
+        return t, np.asarray(membrane[t]), nuclei, spacing, p, pairs, refine
 
     def collect(t: int, labels: np.ndarray, feats: dict, done: int) -> None:
         merged[t - offset] = labels
@@ -186,21 +242,71 @@ def compute_membrane_features(
 
 
 def _merge_job(args: tuple) -> tuple[int, np.ndarray, dict]:
-    """Merge one frame; module level so worker processes can run it."""
-    t, membrane, nuclei, spacing, params, pairs = args
+    """Merge (and refine) one frame; module level so workers can run it."""
+    t, membrane, nuclei, spacing, params, pairs, refine = args
     res = merge_frame(
         membrane, nuclei, spacing=spacing, params=params, dividing_pairs=pairs
     )
-    return t, res.labels, res.features
+    labels, feats = res.labels, res.features
+    if refine is not None:
+        labels = _refine_frame(labels, feats, nuclei, spacing, *refine)
+    return t, labels, feats
+
+
+def _refine_frame(
+    labels, feats, nuclei, merge_spacing, raw, spacing, mitotic, sp, rp, cavity
+) -> np.ndarray:
+    """Refine merged labels on the raw image; updates `feats` in place."""
+    from scipy import ndimage
+
+    embryo = embryo_from_raw(raw)
+    fg = embryo | (labels > 0)
+    if not fg.any():
+        return labels
+    box = tuple(
+        slice(max(s.start - 8, 0), min(s.stop + 8, n))
+        for s, n in zip(
+            ndimage.find_objects(fg.astype(np.uint8))[0], fg.shape, strict=True
+        )
+    )
+    r, n_sub, emb = raw[box], nuclei[box], embryo[box]
+    score = membrane_score(r, n_sub, spacing, mitotic, sp, embryo=emb)
+    sub, _ = refine_boundaries(labels[box], score, n_sub, spacing, rp)
+    sub, _ = drop_islands(sub, spacing)
+    if cavity:
+        sub[raw_cavity(r, n_sub, spacing, emb, rp)] = 0
+    labels = labels.copy()
+    labels[box] = sub
+    signal = boundary_signal(sub, score)
+    voxel = float(np.prod(merge_spacing))
+    counts = np.bincount(sub.ravel())
+    for rec in feats.values():
+        mid = rec["membrane_id"]
+        if mid:
+            rec["membrane_volume"] = (
+                float(counts[mid] if mid < counts.size else 0) * voxel
+            )
+        rec["membrane_boundary_signal"] = signal.get(mid, float("nan"))
+    return labels
 
 
 def add_membrane_features(tracks: Tracks, features: dict[int, dict]) -> None:
-    """Register the membrane feature keys and write the per-node values."""
-    for key, feature in MEMBRANE_FEATURES.items():
+    """Register the membrane feature keys and write the per-node values.
+
+    The raw-image features are registered only when the records carry them.
+    """
+    nodes = list(features)
+    keys = dict(MEMBRANE_FEATURES)
+    for key, feature in RAW_FEATURES.items():
+        if any(key in features[n] for n in nodes):
+            keys[key] = feature
+    for key, feature in keys.items():
         if key not in tracks.features:
             tracks.add_feature(key, feature)
-    nodes = list(features)
     if not nodes:
         return
-    for key in MEMBRANE_FEATURES:
-        tracks._set_nodes_attr(nodes, key, [features[n][key] for n in nodes])
+    for key, feature in keys.items():
+        default = feature["default_value"]
+        tracks._set_nodes_attr(
+            nodes, key, [features[n].get(key, default) for n in nodes]
+        )
