@@ -18,6 +18,7 @@ Every candidate is measured; the stage is a classification, not a gate.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -32,14 +33,16 @@ from . import spindle3d as s3d
 if TYPE_CHECKING:
     from funtracks.data_model import Tracks
 
-ISO = 0.25  # um, Spindle3D voxelSizeForAnalysis
+ISO = 0.25  # um, default Spindle3D voxelSizeForAnalysis
 
 
 @dataclass
 class SpindleParams:
     """Parameters of the spindle measurement (lengths in um)."""
 
-    spacing: tuple = (1.0, 0.26, 0.26)  # voxel size (z, y, x)
+    spacing: tuple = ()  # voxel size (z, y, x); () = from the tracks
+    max_frame: int = -1  # only divisions up to this frame; -1 = all
+    timepoints_before: int = 6  # frames per division
     half_size_um: float = 20.0  # half box size in y/x
     z_extra_um: float = 4.0  # extra half size in z, padded beyond the volume
     other_dilate_um: float = 1.0  # other nuclei grown by this before zeroing
@@ -61,8 +64,6 @@ class SpindleParams:
     centrosome_beyond_um: float = 6.0
     # QC flags
     axis_vs_plate_flag_deg: float = 10.0
-    # Spindle3D option: "java" replicates v0.8.0, "um" uses L/2 in um
-    pole_profile_radius: str = "java"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -416,9 +417,9 @@ def angle_deg(u, v) -> float:
     return float(np.degrees(np.arccos(min(c, 1.0))))
 
 
-def iso_to_frame_um(p_iso, crop_lo_px, spacing) -> np.ndarray:
-    """Iso crop voxel index -> um of the frame (iso index j <-> j * 0.25 um)."""
-    return np.asarray(p_iso, float) * ISO + np.asarray(crop_lo_px, float) * np.asarray(
+def iso_to_frame_um(p_iso, crop_lo_px, spacing, vs: float = ISO) -> np.ndarray:
+    """Iso crop voxel index -> um of the frame (iso index j <-> j * vs um)."""
+    return np.asarray(p_iso, float) * vs + np.asarray(crop_lo_px, float) * np.asarray(
         spacing, float
     )
 
@@ -429,30 +430,31 @@ def iso_to_frame_um(p_iso, crop_lo_px, spacing) -> np.ndarray:
 def measure_crop(job: dict) -> dict:
     """Spindle3D + centrosomes + features for one crop (worker entry point).
 
-    job: tub, dna (3D arrays), params (dict), crop_lo_px. Returns status ("ok" or
-    "failed: <reason>"), features, qc (masks/points in the iso crop grid),
-    diag (spindle thresholds) and seconds.
+    job: tub, dna (3D arrays), params (SpindleParams as dict, spacing resolved),
+    settings (JavaSettings as dict; default Java v0.8.0), crop_lo_px. Returns
+    status ("ok" or "failed: <reason>"), features, qc (masks/points in the iso
+    crop grid, voxel size qc["iso_voxel_um"]), diag (spindle thresholds) and
+    seconds.
     """
     p = SpindleParams.from_dict(job["params"])
-    st = s3d.JavaSettings(
-        pole_profile_radius=p.pole_profile_radius,
-        threshold_exclude_um=p.threshold_exclude_um
-        if p.correction == "ignore"
-        else 0.0,
-    )
+    st = s3d.JavaSettings(**job.get("settings", {}))
+    vs = st.voxel_size_for_analysis
+    excl = p.threshold_exclude_um if p.correction == "ignore" else 0.0
     t0 = time.perf_counter()
     res = {"status": "ok", "traceback": ""}
     feats: dict = {}
     qc: dict = {}
     diag: dict = {}
     try:
-        r = s3d.measure(job["tub"], job["dna"], p.spacing, st, keep=True)
+        r = s3d.measure(
+            job["tub"], job["dna"], p.spacing, st, keep=True, threshold_exclude_um=excl
+        )
         for jk, fk in JAVA_KEYS.items():
             feats[fk] = float(r[jk]) if r.get(jk) is not None else np.nan
         sp = np.asarray(p.spacing, float)
         lo = job["crop_lo_px"]
         poles_iso = s3d.a_to_iso_points(r["poles_um"], r)
-        P = np.array([iso_to_frame_um(q, lo, sp) for q in poles_iso])
+        P = np.array([iso_to_frame_um(q, lo, sp, vs) for q in poles_iso])
         v = P[1] - P[0]
         u = unit_sign(v)
         mid = P.mean(0)
@@ -480,14 +482,14 @@ def measure_crop(job: dict) -> dict:
             r["A_tub"],
             r["spindle_mask_A"],
             o,
-            ISO,
+            vs,
             p,
             0.5 * r["metaphase_plate_width_um"],
             r["spindle_threshold"],
         )
-        c_um_A = [(c["pos"] - o) * ISO for c in cents]
+        c_um_A = [(c["pos"] - o) * vs for c in cents]
         c_frame = (
-            [iso_to_frame_um(q, lo, sp) for q in s3d.a_to_iso_points(c_um_A, r)]
+            [iso_to_frame_um(q, lo, sp, vs) for q in s3d.a_to_iso_points(c_um_A, r)]
             if cents
             else []
         )
@@ -520,24 +522,24 @@ def measure_crop(job: dict) -> dict:
         feats["centrosome_in_mask"] = ";".join(str(int(c["in_mask"])) for c in cents)
         # continuity of the spindle mask through the plate (A frame)
         sm = r["spindle_mask_A"]
-        hz = max(int(round(0.5 * r["metaphase_plate_width_um"] / ISO)), 1)
+        hz = max(int(round(0.5 * r["metaphase_plate_width_um"] / vs)), 1)
         zsl = slice(max(o[0] - hz, 0), o[0] + hz + 1)
         yy, xx = np.indices(sm.shape[1:])
-        core_disc = np.hypot(yy - o[1], xx - o[2]) * ISO <= 1.0
+        core_disc = np.hypot(yy - o[1], xx - o[2]) * vs <= 1.0
         feats["plate_axis_mask_fraction"] = float(sm[zsl][:, core_disc].mean())
         feats["spindle_mask_components"] = int(ndi.label(sm, structure=s3d.S6)[1])
         feats["n_width_angles"] = r["n_width_angles"]
         # where the refined poles sit relative to the mask tips and centrosomes
-        PA = [np.asarray(q, float) / ISO + o for q in r["poles_um"]]  # A-frame index
+        PA = [np.asarray(q, float) / vs + o for q in r["poles_um"]]  # A-frame index
         ua = (PA[1] - PA[0]) / max(np.linalg.norm(PA[1] - PA[0]), 1e-9)
         rel = np.argwhere(sm).astype(float) - PA[0]
         proj = rel @ ua
-        latd = np.linalg.norm(rel - np.outer(proj, ua), axis=1) * ISO
+        latd = np.linalg.norm(rel - np.outer(proj, ua), axis=1) * vs
         near = latd <= 2.0
         if near.any():
             pb = (PA[1] - PA[0]) @ ua
             feats["pole_tip_offset_um"] = (
-                f"{-proj[near].min() * ISO:.2f};{(proj[near].max() - pb) * ISO:.2f}"
+                f"{-proj[near].min() * vs:.2f};{(proj[near].max() - pb) * vs:.2f}"
             )
         if cents:
             cd = [
@@ -553,6 +555,7 @@ def measure_crop(job: dict) -> dict:
         )
         # QC / napari: masks and points in the iso crop grid
         qc["iso_shape"] = r["iso_shape"]
+        qc["iso_voxel_um"] = vs
         qc["dna_mask"] = s3d.a_mask_to_iso(r["dna_mask_A"], r)
         qc["spindle_mask"] = s3d.a_mask_to_iso(r["spindle_mask_A"], r)
         qc["poles"] = poles_iso
@@ -625,12 +628,33 @@ def prepare_case(node, t, a_frame, d_frame, seg_frame, bbox, p: SpindleParams) -
     return case
 
 
-def measure_node(tracks: Tracks, node: int, tubulin, dna, p: SpindleParams):
+def resolve_spacing(params: SpindleParams, tracks: Tracks) -> SpindleParams:
+    """params with an empty spacing replaced by the voxel size of the tracks."""
+    if params.spacing:
+        return params
+    scale = getattr(tracks, "scale", None)
+    if not scale:
+        raise ValueError(
+            "no voxel size: set [pipeline] spacing or store it with the tracks"
+        )
+    return dataclasses.replace(params, spacing=tuple(float(v) for v in scale[1:]))
+
+
+def measure_node(
+    tracks: Tracks,
+    node: int,
+    tubulin,
+    dna,
+    p: SpindleParams | None = None,
+    settings: s3d.JavaSettings | None = None,
+):
     """Measure one node (e.g. for the viewer). Returns (row, case, result).
 
     tubulin, dna: lazy (t, z, y, x) stacks indexable by frame, e.g. from
     `motile_tracker.membrane.io.read_label_file`.
     """
+    p = resolve_spacing(p or SpindleParams(), tracks)
+    settings = settings or s3d.JavaSettings()
     t = int(tracks.get_time(node))
     seg = np.asarray(tracks.segmentation[t])
     case = prepare_case(
@@ -647,6 +671,7 @@ def measure_node(tracks: Tracks, node: int, tubulin, dna, p: SpindleParams):
             "tub": case["tub"],
             "dna": case["dna"],
             "params": p.to_dict(),
+            "settings": dataclasses.asdict(settings),
             "crop_lo_px": case["meta"]["crop_lo_px"],
         }
     )
@@ -659,8 +684,9 @@ def measure_tracks(
     tubulin,
     dna,
     params: SpindleParams | None = None,
+    settings: s3d.JavaSettings | None = None,
     max_frame: int | None = None,
-    timepoints_before: int = 6,
+    timepoints_before: int | None = None,
     workers: int = 1,
     progress: Callable[[int, int], None] | None = None,
 ) -> Iterator[tuple[dict, dict, dict]]:
@@ -670,16 +696,27 @@ def measure_tracks(
         tracks: Tracks with a nuclei segmentation (node id = label) and bbox.
         tubulin, dna: microtubule and DNA images (t, z, y, x), indexable by
             frame (lazy is fine; frames are read once each).
-        params: Measurement parameters (voxel size in params.spacing).
-        max_frame: Only divisions at or before this frame.
-        timepoints_before: Frames per division (the division node and its
-            predecessors).
+        params: Pipeline parameters ([pipeline]); an empty spacing is taken
+            from the tracks.
+        settings: Spindle3D settings ([spindle3d]); default Java v0.8.0.
+        max_frame: Only divisions at or before this frame (default
+            params.max_frame; -1 or None = all).
+        timepoints_before: Frames per division, the division node and its
+            predecessors (default params.timepoints_before).
         workers: Crops measured in parallel processes.
         progress: Called with (number done, number of candidates).
     """
     p = params or SpindleParams()
     if p.correction not in ("ignore", "none"):
         raise ValueError(f"unknown correction {p.correction!r} (use ignore or none)")
+    p = resolve_spacing(p, tracks)
+    settings = settings or s3d.JavaSettings()
+    if max_frame is None:
+        max_frame = p.max_frame
+    if max_frame is not None and max_frame < 0:
+        max_frame = None
+    if timepoints_before is None:
+        timepoints_before = p.timepoints_before
     cands = find_candidates(tracks, max_frame, timepoints_before)
     by_t: dict[int, list] = {}
     for c in cands:
@@ -687,6 +724,7 @@ def measure_tracks(
     total = len(cands)
     done = 0
     pdict = p.to_dict()
+    sdict = dataclasses.asdict(settings)
     pool = None
     if workers > 1:
         from concurrent.futures import ProcessPoolExecutor
@@ -726,6 +764,7 @@ def measure_tracks(
                     "tub": case["tub"],
                     "dna": case["dna"],
                     "params": pdict,
+                    "settings": sdict,
                     "crop_lo_px": case["meta"]["crop_lo_px"],
                 }
                 row = _base_row(cand, case, case["stage"])

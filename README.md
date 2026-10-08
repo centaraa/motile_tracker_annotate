@@ -107,7 +107,7 @@ needs about 2 to 3 GB of memory. `--help` lists all options.
 uv run python scripts/spindle_features.py TRACKS TUBULIN DNA OUT.geff --spacing 1,0.26,0.26 --workers 4
 ```
 
-See [src/motile_tracker/spindle/README.md](src/motile_tracker/spindle/README.md) for the inputs, the pipeline, the feature list and the differences from the Java plugin.
+All parameters can be set in one TOML config (`--config`, defaults in `src/motile_tracker/spindle/default_config.toml`); each run writes its resolved config next to the outputs. See [src/motile_tracker/spindle/README.md](src/motile_tracker/spindle/README.md) for the inputs, the pipeline, the configuration, the feature list and the differences from the Java plugin.
 
 ## Package the application into an executable and create the installer
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .core import ISO
+from .core import ISO as _ISO
 
 
 def _extent(shape2, sc2):
@@ -41,6 +41,7 @@ def draw_qc(case: dict, res: dict, row: dict, spacing, png_path, thumbs=None) ->
 
     sp = np.asarray(spacing, float)
     qc = res.get("qc", {}) if res else {}
+    ISO = qc.get("iso_voxel_um", _ISO)  # noqa: N806 - isotropic analysis voxel (um)
     fig, axes = plt.subplots(2, 4, figsize=(17, 9))
     chans = [
         ("488 (bg-subtracted, used as is)", case["a_b"], "gray"),

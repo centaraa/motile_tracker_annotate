@@ -1,0 +1,66 @@
+# Spindle measurement parameters (motile_tracker.spindle); all values are the defaults.
+# [spindle3d] = Spindle3D v0.8.0 (Java) settings; [pipeline] = crop, candidates,
+# threshold exclusion, stage classification, centrosomes and flags.
+# Pass a copy with --config to scripts/spindle_features.py; CLI options override it.
+
+[spindle3d]
+# um; isotropic voxel size of the analysis (Java voxelSizeForAnalysis)
+voxel_size_for_analysis = 0.25
+# um; derivative step of the axial DNA profile, plate width (Java metaphasePlateWidthDerivativeDelta)
+metaphase_plate_width_derivative_delta = 1.0
+# um; derivative step of the radial DNA profile, plate length (Java metaphasePlateLengthDerivativeDelta)
+metaphase_plate_length_derivative_delta = 2.0
+# um; spindle mask components with any voxel this close to the DNA centre are kept (Java spindleFragmentInclusionZone)
+spindle_fragment_inclusion_zone = 3.0
+# um; half axial size of the pole refinement box (Java axialPoleRefinementRadius)
+axial_pole_refinement_radius = 1.0
+# um; half lateral size of the pole refinement box (Java lateralPoleRefinementRadius)
+lateral_pole_refinement_radius = 2.0
+# um; voxel size for the initial DNA threshold (Java voxelSizeForInitialDNAThreshold)
+voxel_size_for_initial_dna_threshold = 1.5
+# initial DNA threshold = min + factor * (max - min) (Java initialDnaThresholdFactor)
+initial_dna_threshold_factor = 0.5
+# grey values; stop if the initial DNA threshold is lower (Java minimalDynamicRange)
+minimal_dynamic_range = 7.0
+# "java": axial mask profile within L/2 voxels of the axis as in v0.8.0 computeMaximum; "um": within L/2 um
+pole_profile_radius = "java"
+
+[pipeline]
+# um; voxel size [z, y, x] of the images; [] = the voxel size stored with the tracks
+spacing = []
+# only divisions up to this frame; -1 = all
+max_frame = -1
+# frames measured per division: the dividing node and its predecessors
+timepoints_before = 6
+# um; half size of the crop in y and x around the nucleus
+half_size_um = 20.0
+# um; added to the half size in z (padded beyond the volume)
+z_extra_um = 4.0
+# um; other nuclei are grown by this before they are set to 0 in the DNA crop
+other_dilate_um = 1.0
+# "ignore": chromatin + threshold_exclude_um kept out of the spindle threshold; "none": Java threshold rim
+correction = "ignore"
+# um; margin around the DNA mask excluded from the spindle threshold (correction = ignore)
+threshold_exclude_um = 1.0
+# um; axial blur removed from the chromatin thickness for the stage metrics (0 = off)
+psf_sigma_z_um = 0.0
+# stage: chromatin shortest/longest axis above this = prometaphase (not flat)
+plate_flat_max = 0.4
+# stage: chromatin middle/longest axis below this = unclear (not a disc)
+plate_disc_min = 0.6
+# stage: second/largest chromatin mass at or above this = split
+split_min_frac = 0.2
+# stage: Spindle3D plate length / chromatin extent below this = prometaphase (no plate rim)
+plate_rim_min_ratio = 0.5
+# um; stage: Spindle3D plate width above this = prometaphase (thick plate)
+plate_width_max_um = 4.0
+# um3; chromatin masses smaller than this are not counted
+min_mass_um3 = 5.0
+# centrosome: peak / median of a 1.5-3 um shell at least this
+centrosome_contrast_min = 2.0
+# um; centrosome: at most this far from the spindle axis
+centrosome_lateral_um = 4.0
+# um; centrosome: at most this far beyond the end of the spindle mask
+centrosome_beyond_um = 6.0
+# deg; flag spindle_flag_axis_vs_plate if the axis is further from the plate normal
+axis_vs_plate_flag_deg = 10.0

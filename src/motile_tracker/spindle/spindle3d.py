@@ -42,9 +42,6 @@ class JavaSettings:  # Spindle3DSettings.java defaults
     # given in um, i.e. the profile radius is L/2 voxels = L/8 um. "java" replicates
     # this (default, matches the published behaviour); "um" uses L/2 um.
     pole_profile_radius: str = "java"
-    # DEVIATION if > 0: exclude the DNA mask dilated by this margin (um) from the
-    # spindle threshold estimate (see measureSpindleThreshold below). 0 = Java.
-    threshold_exclude_um: float = 0.0
 
 
 S26 = np.ones((3, 3, 3), bool)  # imglib2 EIGHT_CONNECTED in 3D
@@ -245,7 +242,26 @@ def pole_edges_along_z(mask, origin, radius, vs):
 # ---------------------------------------------------------------------------
 # Spindle3DMorphometry.measure()
 # ---------------------------------------------------------------------------
-def measure(tubulin, dna, spacing, st: JavaSettings | None = None, keep=False):
+def measure(
+    tubulin,
+    dna,
+    spacing,
+    st: JavaSettings | None = None,
+    keep=False,
+    threshold_exclude_um: float = 0.0,
+):
+    """Spindle3DMorphometry.measure() on one crop.
+
+    Args:
+        tubulin, dna: 3D arrays (z, y, x) of one crop.
+        spacing: voxel size (z, y, x) in um.
+        st: Spindle3D settings (default: Java v0.8.0).
+        keep: also return the aligned tubulin (A_tub) for centrosome detection.
+        threshold_exclude_um: DEVIATION if > 0: the DNA mask dilated by this
+            margin is kept out of the spindle threshold (0 = Java).
+
+    Raises MeasurementError where the Java code throws.
+    """
     st = st if st is not None else JavaSettings()
     vs = st.voxel_size_for_analysis
     out = {"status": "ok", "voxel_size": vs}
@@ -366,12 +382,12 @@ def measure(tubulin, dna, spacing, st: JavaSettings | None = None, keep=False):
     out["chromatin_volume_um3"] = float(dmask.sum() * vs**3)
 
     # measureSpindleThreshold (l. 433)
-    # DEVIATION (optional, st.threshold_exclude_um > 0): the 1-voxel rim is taken
+    # DEVIATION (optional, threshold_exclude_um > 0): the 1-voxel rim is taken
     # around the DNA mask dilated by threshold_exclude_um (physical, isotropic here)
     # instead of around the DNA mask itself, and the box is enlarged by the same
     # margin, so chromatin (and a possible DNA leak into the tubulin channel at
     # the plate rim) does not enter the threshold estimate.
-    m_ex = float(st.threshold_exclude_um or 0.0)
+    m_ex = float(threshold_exclude_um or 0.0)
     lat_half = int((plate_length / 2.0 + 2.0 + m_ex) / vs)
     ax_half = int((plate_width / 2.0 + 2.0 + m_ex) / vs)
     sl = (

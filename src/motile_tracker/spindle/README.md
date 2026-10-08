@@ -18,23 +18,44 @@ uv run python scripts/spindle_view.py OUT.geff TUBULIN DNA --node 9449     # or 
 - `TUBULIN`: the microtubule channel (e.g. 488).
 - `DNA`: the DNA channel (e.g. 561).
 - `TUBULIN` and `DNA` are each a zarr array, a tiff, or a folder of one tiff per timepoint (sorted by name). They must have the same shape as the segmentation and are read one frame at a time.
-- `--spacing z,y,x`: the voxel size in µm. The default is the voxel size stored with the tracks; pass it if the geff stores 1.
+- `--spacing z,y,x`: the voxel size in µm. If it is not given, `[pipeline] spacing` from the config is used, else the voxel size stored with the tracks. Pass it if the geff stores 1.
 
 **Outputs next to `OUT.geff`:**
 - `OUT.geff`: the tracks with the `spindle_*` node features.
 - `<stem>_spindle.csv`: one row per candidate, with the features plus diagnostics.
-- `<stem>_params.json`: the parameters used; `spindle_view.py` reads it.
+- `<stem>_config.toml`: the complete resolved config of the run (all values, both sections). Pass it back with `--config` to reproduce the run; `spindle_view.py` reads it.
 - `<stem>_threshold_diagnostic.csv`: the spindle thresholds per node. These are internal intensity values, not features.
 - `qc_<stem>/`: one PNG per candidate plus `overview.png`. Skip them with `--no-qc`; matplotlib is only needed for the QC images.
 
-**Options:**
-- `--timepoints-before N` (default 6): frames per division. These are the division node (frame 1 before the division) and its predecessors.
-- `--max-frame T`: only divisions up to frame T.
+**Options** (each overrides the same key from `--config`):
+- `--config FILE`: a TOML config (see below).
+- `--timepoints-before N` (`[pipeline] timepoints_before`, default 6): frames per division. These are the division node (frame 1 before the division) and its predecessors.
+- `--max-frame T` (`max_frame`, default −1 = all): only divisions up to frame T.
 - `--correction ignore|none` (default `ignore`): see step 4 below.
 - `--threshold-exclude-um` (default 1.0).
-- `--pole-profile-radius java|um` (default `java`): see the quirks below.
+- `--pole-profile-radius java|um` (`[spindle3d]`, default `java`): see the quirks below.
 - `--half-size-um` (default 20) and `--z-extra-um` (default 4): the crop size.
-- `--workers N`: crops measured in parallel. About 2 to 6 s per crop.
+- `--workers N`: crops measured in parallel. About 2 to 6 s per crop. This does not change the results, so it is not part of the config.
+- `--write-default-config FILE`: write the default config and exit.
+
+## Configuration
+
+All parameters are set in one TOML file with two sections; each parameter lives in exactly one of them:
+- **`[spindle3d]`** holds the Spindle3D algorithm settings (`spindle3d.JavaSettings`). These are the `Spindle3DSettings.java` parameters: `voxel_size_for_analysis`, the two derivative deltas, `spindle_fragment_inclusion_zone`, the axial and lateral pole refinement radii, `voxel_size_for_initial_dna_threshold`, `initial_dna_threshold_factor`, `minimal_dynamic_range`. It also holds the Java-quirk option `pole_profile_radius`. The defaults are the published Java v0.8.0 behaviour.
+- **`[pipeline]`** holds everything around Spindle3D (`core.SpindleParams`): `spacing`, `max_frame`, `timepoints_before`, the crop size, `other_dilate_um`, `correction` and `threshold_exclude_um`, the stage thresholds, the centrosome rules and the flag limit.
+  - `threshold_exclude_um` lives here because it is a deviation from Java, applied when `correction = "ignore"`. Spindle3D receives it as an argument of `spindle3d.measure`.
+
+The defaults live in the dataclasses. [`default_config.toml`](default_config.toml) lists every parameter with its default and a one-line comment (unit, meaning, Java name). It is the same text that `--write-default-config` writes, and a test keeps them in sync.
+
+**Order of precedence:** defaults, then `--config FILE`, then the options given explicitly on the command line. Unknown sections or keys, and values of the wrong type, are an error.
+
+**Reproducing a run:** every run writes `<stem>_config.toml` with all resolved values, including the voxel size actually used. The commented header records the input paths. To reproduce a run:
+
+```bash
+uv run python scripts/spindle_features.py TRACKS TUBULIN DNA OUT2.geff --config OUT_config.toml
+```
+
+`spindle_view.py` reads `<stem>_config.toml` next to the geff, or `--config FILE`. A geff written before the config existed is read from the older `<stem>_params.json`, with a warning.
 
 ## Pipeline
 
@@ -133,7 +154,7 @@ The measured values appear as a text overlay. `--best` picks the ok metaphase wi
 
 ## Quirks of Java Spindle3D v0.8.0 kept on purpose
 
-- **Pole profile radius.** Java's `computeMaximum` compares voxel coordinates with metaphasePlateLength/2 given in µm. The axial mask profile is therefore taken within L/8 µm (about 2 µm) of the axis instead of L/2 µm. `--pole-profile-radius um` uses L/2 µm.
+- **Pole profile radius.** Java's `computeMaximum` compares voxel coordinates with metaphasePlateLength/2 given in µm. The axial mask profile is therefore taken within L/8 µm (about 2 µm) of the axis instead of L/2 µm. `pole_profile_radius = "um"` (or `--pole-profile-radius um`) uses L/2 µm.
 - **Radial DNA profile.** `cursor.localize()` is called before `cursor.next()`, so each value is binned with the previous pixel's position.
 - **Tubulin dynamic-range check.** It compares `measurements.spindleThreshold`, which is still NaN at that point, so it never triggers.
 - **SNR split.** (L/2 − 2)² is not clipped at 0. This only affects the SNR, which is not reported.

@@ -1,12 +1,13 @@
 """Show one node's spindle measurement in napari, recomputed on the fly.
 
 Usage:
-    python scripts/spindle_view.py OUT.geff TUBULIN DNA --node ID [--dry-run]
+    python scripts/spindle_view.py OUT.geff TUBULIN DNA --node ID [--dry-run] [--config FILE]
     python scripts/spindle_view.py OUT.geff TUBULIN DNA --best
     python scripts/spindle_view.py OUT.geff TUBULIN DNA --list
 
 OUT.geff is written by spindle_features.py; the parameters are read from
-<stem>_params.json next to it, so the recomputed result matches the batch run.
+<stem>_config.toml next to it (or --config FILE), so the recomputed result
+matches the batch run. An older <stem>_params.json is read as a fallback.
 --best picks the ok metaphase node without QC flags and with two centrosomes
 whose axis is closest to the centrosome line. --dry-run prints the layers and
 values instead of opening napari.
@@ -27,7 +28,8 @@ from funtracks.import_export import import_from_geff
 
 from motile_tracker.membrane.io import read_label_file
 from motile_tracker.spindle import SpindleParams, measure_node
-from motile_tracker.spindle.core import ISO
+from motile_tracker.spindle.config import SpindleConfig, load_config
+from motile_tracker.spindle.core import resolve_spacing
 
 SHOW_KEYS = [
     "spindle_status",
@@ -96,6 +98,24 @@ def _best(rows):
     raise SystemExit("no ok metaphase node in this geff")
 
 
+def _load_run_config(geff: Path, config: Path | None) -> tuple[SpindleConfig, str]:
+    """--config, else <stem>_config.toml, else an old <stem>_params.json."""
+    if config is not None:
+        return load_config(config), str(config)
+    cpath = geff.parent / f"{geff.stem}_config.toml"
+    if cpath.exists():
+        return load_config(cpath), str(cpath)
+    old = geff.parent / f"{geff.stem}_params.json"
+    if old.exists():
+        print(f"warning: {cpath.name} not found, reading the older {old.name}")
+        d = json.loads(old.read_text(encoding="utf-8"))["params"]
+        java = {"pole_profile_radius": d.pop("pole_profile_radius", "java")}
+        pipe = {k: v for k, v in d.items() if k in SpindleParams.__dataclass_fields__}
+        return load_config(overrides={"spindle3d": java, "pipeline": pipe}), str(old)
+    print(f"warning: {cpath.name} not found, using the default parameters")
+    return SpindleConfig(), "defaults"
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("geff", type=Path)
@@ -105,6 +125,12 @@ def main(argv=None):
     g.add_argument("--node", type=int)
     g.add_argument("--best", action="store_true")
     g.add_argument("--list", action="store_true")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="config TOML (default: <stem>_config.toml next to the geff)",
+    )
     p.add_argument("--dry-run", action="store_true", help="print, do not open napari")
     args = p.parse_args(argv)
 
@@ -119,21 +145,22 @@ def main(argv=None):
             print("\t".join(_fmt(r[c]) for c in cols))
         return
     node = _best(rows) if args.best else args.node
-    ppath = args.geff.parent / f"{args.geff.stem}_params.json"
-    if ppath.exists():
-        params = SpindleParams.from_dict(
-            json.loads(ppath.read_text(encoding="utf-8"))["params"]
-        )
-    else:
-        print(f"warning: {ppath} not found, using default parameters")
-        params = SpindleParams()
+    config, cpath = _load_run_config(args.geff, args.config)
+    params, settings = config.pipeline, config.spindle3d
     row, case, res = measure_node(
-        tracks, node, read_label_file(args.tubulin), read_label_file(args.dna), params
+        tracks,
+        node,
+        read_label_file(args.tubulin),
+        read_label_file(args.dna),
+        params,
+        settings,
     )
+    params = resolve_spacing(params, tracks)
     vals = {k: tracks.get_node_attr(node, k) for k in SHOW_KEYS}
     sp = np.asarray(params.spacing, float)
     origin = np.asarray(case["meta"]["crop_lo_px"], float) * sp  # um of crop voxel 0
     qc = res.get("qc", {})
+    ISO = qc.get("iso_voxel_um", settings.voxel_size_for_analysis)  # noqa: N806
     iso = (ISO,) * 3
     layers = [
         (
@@ -244,7 +271,7 @@ def main(argv=None):
     diag = res.get("diag", {})
     print(title)
     print(
-        f"  params: {ppath if ppath.exists() else 'defaults'}; correction {params.correction}; "
+        f"  config: {cpath}; correction {params.correction}; "
         f"spindle threshold {diag.get('threshold_used', np.nan):.1f} "
         f"(plain Java rim {diag.get('threshold_java_rim', np.nan):.1f})"
     )
