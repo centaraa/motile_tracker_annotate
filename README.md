@@ -99,6 +99,16 @@ the width of inlets the embryo outline closes. Lengths are in µm, using the
 voxel size stored with the tracks (voxels if none is stored). Each worker
 needs about 2 to 3 GB of memory. `--help` lists all options.
 
+## Spindle measurement
+
+`scripts/spindle_features.py` measures the mitotic spindle (length, width, volume, axis, angles, centrosomes and mitotic stage) of every tracked nucleus in the last frames before it divides. It is a Python re-implementation of Spindle3D (Kletter et al., J Cell Biol 2022) run on the microtubule and DNA channels, and it writes `spindle_*` node features into a copy of the tracks. `scripts/spindle_view.py` shows one node's result in napari. Run it after the nuclei are corrected:
+
+```bash
+uv run python scripts/spindle_features.py TRACKS TUBULIN DNA OUT.geff --spacing 1,0.26,0.26 --workers 4
+```
+
+See [src/motile_tracker/spindle/README.md](src/motile_tracker/spindle/README.md) for the inputs, the pipeline, the feature list and the differences from the Java plugin.
+
 ## Package the application into an executable and create the installer
 
 Tagging any branch will automatically trigger the deploy.yml workflow,
