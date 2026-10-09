@@ -27,6 +27,7 @@ from .refine import (
     drop_islands,
     raw_cavity,
     refine_boundaries,
+    voronoi_correct,
 )
 from .score import ScoreParams, embryo_from_raw, membrane_score, mitotic_nodes
 
@@ -265,7 +266,7 @@ def _refine_frame(
     """Refine merged labels on the raw image; updates `feats` in place."""
     from scipy import ndimage
 
-    embryo = embryo_from_raw(raw)
+    embryo = embryo_from_raw(raw, spacing, sp.outline_frac, sp.outline_close_um)
     fg = embryo | (labels > 0)
     if not fg.any():
         return labels
@@ -307,7 +308,11 @@ def _refine_frame(
     # left empty; every voxel in it (but not in the cavity) goes to the
     # nearest cell before the boundaries move onto the membrane.
     inside = emb if cav is None else emb & ~cav
-    if sub.any() and inside.any():
+    if rp.voronoi and sub.any():
+        # Gaps go to the nearest nucleus' cell, and cell parts reaching far
+        # into another nucleus' Voronoi region are handed over.
+        sub, _ = voronoi_correct(sub, n_sub, inside, spacing, rp.voronoi_margin_um)
+    elif sub.any() and inside.any():
         sub = fill_within(sub, inside | (sub > 0), spacing)
     sub, _ = refine_boundaries(sub, score, n_sub, spacing, rp)
     sub, _ = drop_islands(sub, spacing)

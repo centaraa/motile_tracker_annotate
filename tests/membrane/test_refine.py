@@ -6,12 +6,14 @@ from motile_tracker.membrane.features import (
     add_membrane_features,
     compute_membrane_features,
 )
+from motile_tracker.membrane.merge import fill_within
 from motile_tracker.membrane.refine import (
     RefineParams,
     boundary_signal,
     drop_islands,
     raw_cavity,
     refine_boundaries,
+    voronoi_correct,
 )
 from motile_tracker.membrane.score import (
     ScoreParams,
@@ -71,6 +73,22 @@ def test_embryo_from_raw_fills_each_slice():
     raw[:, 12:18, 12:18] = 0  # blank inside (a cavity)
     emb = embryo_from_raw(raw)
     assert emb[2, 15, 15] and not emb[2, 1, 1]
+
+
+def test_embryo_from_raw_ends_at_outer_membrane():
+    """A dim non-zero rim around the embryo (deconvolution halo) is left out;
+    the outline follows the bright outer membrane, dim cytoplasm included."""
+    raw = np.zeros((30, 60, 60), np.float32)
+    zz, yy, xx = np.ogrid[:30, :60, :60]
+    r = np.sqrt((zz - 15) ** 2 + (yy - 30) ** 2 + (xx - 30) ** 2)
+    raw[r <= 14] = 3.0  # dim rim, 14 um out
+    raw[r <= 11] = 100.0  # outer membrane, 1 um thick
+    raw[r <= 10] = 40.0  # cytoplasm
+    emb = embryo_from_raw(raw, ISO)
+    assert emb[15, 30, 30] and emb[15, 30, 30 + 10]
+    assert not emb[15, 30, 30 + 13]
+    old = embryo_from_raw(raw, ISO, outline_frac=0)  # the non-zero support
+    assert old[15, 30, 30 + 13]
 
 
 def test_blend_is_uint16_and_boosts_membranes():
@@ -307,3 +325,57 @@ def test_nucleus_inside_other_cell_splits_it_with_raw(solution_tracks_3d):
     nuc3 = np.zeros(merged[0].shape, bool)
     nuc3[45:76, 35:66, 30:61] = True
     assert (merged[0][nuc3] == 3).mean() > 0.9
+
+
+# --- Voronoi correction -------------------------------------------------------
+
+
+def _two_nuclei(shape=(10, 20, 60)):
+    nuclei = np.zeros(shape, np.uint32)
+    nuclei[4:6, 9:11, 8:13] = 1  # surface at x = 12
+    nuclei[4:6, 9:11, 48:53] = 2  # surface at x = 48; Voronoi plane x = 30
+    return nuclei
+
+
+def test_voronoi_clips_cell_reaching_into_neighbour():
+    nuclei = _two_nuclei()
+    labels = np.zeros(nuclei.shape, np.uint32)
+    labels[..., :45] = 1  # cell 1 reaches 15 voxels past the Voronoi plane
+    labels[..., 45:] = 2
+    inside = np.ones(nuclei.shape, bool)
+    out, moved = voronoi_correct(labels, nuclei, inside, ISO, margin_um=5.0)
+    # Along the nuclei's row, d1 - d2 = 2x - 60: beyond the margin from x = 33.
+    assert (out[4:6, 9:11, :33] == 1).all()
+    assert (out[4:6, 9:11, 33:] == 2).all()
+    assert moved > 0
+    # A wide margin keeps the segmentation as it is.
+    kept, moved = voronoi_correct(labels, nuclei, inside, ISO, margin_um=100.0)
+    assert moved == 0
+    assert (kept == labels).all()
+
+
+def test_voronoi_fills_gaps_from_nuclei_not_cells():
+    nuclei = _two_nuclei()
+    labels = np.zeros(nuclei.shape, np.uint32)
+    labels[..., :29] = 1  # a large cell 1, cell 2 only its nucleus
+    labels[nuclei == 2] = 2
+    inside = np.ones(nuclei.shape, bool)
+    out, _ = voronoi_correct(labels, nuclei, inside, ISO, margin_um=5.0)
+    near_cell = fill_within(labels, inside, ISO)
+    # The nearest cell would give cell 1 the gap up to about halfway to
+    # nucleus 2; the nearest nucleus splits it at the Voronoi plane.
+    assert (near_cell[4:6, 9:11, 35] == 1).all()
+    assert (out[4:6, 9:11, 31:] == 2).all()
+    assert (out > 0).all()
+
+
+def test_voronoi_gap_fill_stays_inside(solution_tracks_3d, raw_and_membrane):
+    membrane, raw = raw_and_membrane
+    params = RefineParams(voronoi=True, voronoi_margin_um=5.0)
+    merged, feats = compute_membrane_features(
+        solution_tracks_3d, membrane, raw=raw, refine_params=params, division_window=0
+    )
+    for n in (1, 2, 3):
+        assert feats[n]["membrane_id"] == n
+        assert (merged[0 if n == 1 else 1] == n).any()
+    assert (merged[1][raw[1] == 0] == 0).all()

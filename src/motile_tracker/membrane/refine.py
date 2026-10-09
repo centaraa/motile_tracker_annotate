@@ -15,6 +15,14 @@ watershed from the parts of both cells outside the band:
 Labels outside the band are never touched, so where the labels were already
 right, or the membrane signal is too weak, the result stays the merged one.
 
+Optional Voronoi correction (`voronoi`), before the refinement: the embryo is
+divided among the nuclei by distance from their surfaces (a Voronoi partition
+in um, in which a larger nucleus gets a larger region). Gaps the segmentation
+left take the cell of the nearest nucleus instead of the nearest cell, and a
+cell part lying more than `voronoi_margin_um` beyond its own nucleus' Voronoi
+region goes to the Voronoi neighbour. Within the margin the segmentation is
+kept, and the refinement still moves the boundaries onto the membrane.
+
 Also here: dropping disconnected pieces of a cell, the cavity from blank raw
 signal, and the per-cell boundary signal used for QC. Lengths are in um.
 """
@@ -52,6 +60,11 @@ class RefineParams:
     cavity_depth_um: float = 4.0
     """Cavity must lie this far inside the embryo surface (excludes the rim)."""
     cavity_min_um3: float = 5000.0
+    voronoi: bool = False
+    """Correct the cells with a Voronoi partition from the nuclei (see above);
+    off, gaps take the nearest cell."""
+    voronoi_margin_um: float = 3.0
+    """How far (um) a cell may reach beyond its nucleus' Voronoi region."""
 
 
 def _faces(lab: np.ndarray, score: np.ndarray, a: int, b: int) -> np.ndarray:
@@ -210,6 +223,65 @@ def refine_boundaries(
             st["moved"] += 1
             st["changed_voxels"] += int(changed.sum())
     return labels, st
+
+
+def voronoi_correct(
+    labels: np.ndarray,
+    nuclei: np.ndarray,
+    inside: np.ndarray,
+    spacing,
+    margin_um: float,
+) -> tuple[np.ndarray, int]:
+    """Correct cells towards the Voronoi partition of their nuclei.
+
+    Every voxel's Voronoi owner is the nucleus whose surface is nearest (um),
+    among the nuclei that have a cell. A cell keeps its voxels unless they lie
+    more than `margin_um` closer to another nucleus than to its own; those go
+    to their Voronoi owner, and so do the empty voxels in `inside`.
+
+    Args:
+        labels: cell labels; a cell's value is the node id of its nucleus.
+        nuclei: nuclei labels of the same region.
+        inside: where empty voxels are filled (the embryo without cavities).
+        spacing: voxel size (z, y, x) in um.
+        margin_um: tolerated reach of a cell beyond its Voronoi region.
+
+    Returns:
+        The corrected labels and the number of cell voxels reassigned.
+    """
+    ids = np.unique(labels)
+    ids = ids[ids > 0]
+    seeds = np.where(np.isin(nuclei, ids), nuclei, 0)
+    if not seeds.any():
+        return labels, 0
+    d_min, idx = ndimage.distance_transform_edt(
+        seeds == 0, sampling=spacing, return_indices=True
+    )
+    owner = seeds[tuple(idx)]
+    del idx
+    out = labels.copy()
+    moved = 0
+    cell_boxes = ndimage.find_objects(labels)
+    nuc_boxes = ndimage.find_objects(seeds)
+    for n in ids:
+        cb = cell_boxes[n - 1]
+        nb = nuc_boxes[n - 1] if n <= len(nuc_boxes) else None
+        if cb is None or nb is None:
+            continue
+        # The cell and its nucleus lie in the union box, so the distance to
+        # the nucleus computed there is exact.
+        box = tuple(
+            slice(min(a.start, b.start), max(a.stop, b.stop))
+            for a, b in zip(cb, nb, strict=True)
+        )
+        d_own = ndimage.distance_transform_edt(seeds[box] != n, sampling=spacing)
+        off = (labels[box] == n) & (owner[box] != n) & (d_own - d_min[box] > margin_um)
+        if off.any():
+            out[box][off] = owner[box][off]
+            moved += int(off.sum())
+    gaps = inside & (out == 0)
+    out[gaps] = owner[gaps]
+    return out, moved
 
 
 def drop_islands(labels: np.ndarray, spacing) -> tuple[np.ndarray, int]:

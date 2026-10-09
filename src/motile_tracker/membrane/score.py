@@ -25,6 +25,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import ndimage
 
+from .merge import close_ball
+
 
 @dataclass
 class ScoreParams:
@@ -44,32 +46,82 @@ class ScoreParams:
     """Frames after a division in which a nucleus counts as mitotic."""
     blend_smooth_um: float = 0.5
     """Smoothing (um) of the score before blending it with the raw image."""
+    outline_frac: float = 0.25
+    """Embryo outline: brightness threshold between the dim rim around the
+    embryo (0) and its interior (1); 0 keeps the whole non-zero region."""
+    outline_close_um: float = 4.0
+    """Embryo outline: ball (um) closing gaps in a dim outer membrane."""
 
 
-def embryo_from_raw(raw: np.ndarray) -> np.ndarray:
-    """The embryo as the filled, slightly closed non-zero raw signal, per slice.
+def _nonzero_support(raw: np.ndarray) -> np.ndarray:
+    """The filled, slightly closed non-zero raw signal, per slice.
 
     Deconvolved images can carry sparse non-zero noise outside the embryo
     (about 2 % of the background voxels in Pos_23): a voxel only counts when
     more than half of its surroundings (~1 z-slice, 4 pixels) is non-zero,
-    and only the largest connected region is kept. Filling per z-slice keeps
-    a cavity that opens towards the top or bottom of the stack inside the
-    embryo, which a 3D fill would leave out.
+    and only the largest connected region is kept.
     """
     share = ndimage.gaussian_filter((raw > 0).astype(np.float32), (1, 4, 4))
-    sig = share > 0.5
-    lab, n = ndimage.label(sig)
+    return _fill_slices(share > 0.5)
+
+
+def _fill_slices(mask: np.ndarray) -> np.ndarray:
+    """Largest connected region, closed and hole-filled per z-slice.
+
+    Filling per z-slice keeps a cavity that opens towards the top or bottom
+    of the stack inside the embryo, which a 3D fill would leave out.
+    """
+    lab, n = ndimage.label(mask)
     if n > 1:
         sizes = np.bincount(lab.ravel())
         sizes[0] = 0
-        sig = lab == sizes.argmax()
-    out = np.zeros(sig.shape, bool)
-    for z in range(sig.shape[0]):
-        if sig[z].any():
+        mask = lab == sizes.argmax()
+    out = np.zeros(mask.shape, bool)
+    for z in range(mask.shape[0]):
+        if mask[z].any():
             out[z] = ndimage.binary_fill_holes(
-                ndimage.binary_closing(sig[z], iterations=3)
+                ndimage.binary_closing(mask[z], iterations=3)
             )
     return out
+
+
+def embryo_from_raw(
+    raw: np.ndarray,
+    spacing=(1.0, 1.0, 1.0),
+    outline_frac: float = 0.25,
+    close_um: float = 4.0,
+) -> np.ndarray:
+    """The embryo, bounded by its outer membrane.
+
+    The non-zero region of a deconvolved image reaches 2-4 um beyond the
+    outer membrane (a dim rim: in Pos_23 about 4 against 45-110 inside), so
+    it is only the support. The outer membrane is found as the bright shell
+    inside it: the slightly smoothed raw image above a threshold `outline_frac`
+    of the way from the rim's brightness (the outermost 1 um of the support)
+    to the interior's (deeper than 10 um). A Euclidean ball of `close_um`
+    closes gaps where the outer membrane is dim, and each z-slice is filled,
+    so the dim cytoplasm inside counts as embryo. Where the support has no
+    dim rim (rim at least half as bright as the interior, e.g. a uniform
+    image) or is too small to compare, the support is returned. All lengths in um; `spacing` is the voxel size (z, y, x).
+    """
+    support = _nonzero_support(raw)
+    if outline_frac <= 0 or not support.any():
+        return support
+    spacing = tuple(float(s) for s in spacing)
+    sm = ndimage.gaussian_filter(raw.astype(np.float32), [0.5 / s for s in spacing])
+    depth = ndimage.distance_transform_edt(support, sampling=spacing)
+    rim = support & (depth <= 1.0)
+    core = support & (depth >= 10.0)
+    if not rim.any() or not core.any():
+        return support
+    lo, hi = float(np.median(sm[rim])), float(np.median(sm[core]))
+    if lo >= 0.5 * hi:
+        return support  # no dim rim: the support already ends at the membrane
+    shell = (sm > lo + outline_frac * (hi - lo)) & support
+    del sm, depth
+    shell = close_ball(shell, close_um, spacing) & support
+    out = _fill_slices(shell)
+    return out if out.any() else support
 
 
 def normalise(raw: np.ndarray, embryo: np.ndarray, pct: float = 99.5) -> np.ndarray:
@@ -194,7 +246,10 @@ def membrane_score(
         embryo: the embryo mask; computed from `raw` if not given.
     """
     params = params or ScoreParams()
-    embryo = embryo_from_raw(raw) if embryo is None else embryo
+    if embryo is None:
+        embryo = embryo_from_raw(
+            raw, spacing, params.outline_frac, params.outline_close_um
+        )
     norm = normalise(raw, embryo)
     # The score is multiplied by the brightness, so it is 0 wherever the raw
     # image is; the sheet filter is skipped there.
@@ -228,7 +283,10 @@ def blend_for_segmentation(
     renormalised) membrane score, scaled to uint16 [0, `scale`].
     """
     params = params or ScoreParams()
-    embryo = embryo_from_raw(raw) if embryo is None else embryo
+    if embryo is None:
+        embryo = embryo_from_raw(
+            raw, spacing, params.outline_frac, params.outline_close_um
+        )
     norm = normalise(raw, embryo)
     sm = ndimage.gaussian_filter(score, [params.blend_smooth_um / s for s in spacing])
     if embryo.any():
@@ -249,8 +307,9 @@ def blend_frame(
     Score and blend are computed on the embryo's bounding box only; outside
     it the result is 0, like the raw image.
     """
+    params = params or ScoreParams()
     out = np.zeros(raw.shape, np.uint16)
-    embryo = embryo_from_raw(raw)
+    embryo = embryo_from_raw(raw, spacing, params.outline_frac, params.outline_close_um)
     if not embryo.any():
         return out
     box = tuple(

@@ -130,6 +130,20 @@ cavity) is removed from the cells, and each node gets
 values mark cells whose boundaries are guesses). `--spacing` is the physical
 voxel size (z, y, x in µm) for these steps. Each worker needs about 4 GB.
 
+The embryo outline is the outer membrane, found in the raw image: the
+non-zero region of a deconvolved image reaches a few µm beyond the embryo (a
+dim rim), so the outline is the bright shell inside it, with gaps in a dim
+outer membrane closed by a 4 µm ball. Before the boundaries move, the outline
+is filled:
+every voxel the masks left empty (outside the cavity) goes to the nearest cell,
+and a nucleus without a cell gets one grown from it (QC `from_nucleus`). With
+`--voronoi`, the embryo is instead divided among the nuclei by distance from
+their surfaces (a Voronoi partition): empty voxels go to the cell of the
+nearest nucleus, and a cell part reaching more than `--voronoi-margin` µm
+(default 3) beyond its nucleus' Voronoi region goes to the neighbour. Within
+the margin the masks are kept, and the boundaries still move onto the membrane
+afterwards; this helps where the masks leave large parts of the embryo empty.
+
 ## Package the application into an executable and create the installer
 
 Tagging any branch will automatically trigger the deploy.yml workflow,

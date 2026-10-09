@@ -7,7 +7,7 @@ Usage:
         [--min-contact-area 0] [--max-dist inf] [--min-cell-volume 0]
         [--division-window 1] [--no-split] [--no-embedded] [--no-fill]
         [--outline closed|convex_hull] [--closing-radius 6] [--keep-cavities]
-        [--raw RAW --spacing Z,Y,X]
+        [--raw RAW --spacing Z,Y,X [--voronoi [--voronoi-margin 3]]]
 
 MEMBRANE is a zarr array, a tiff, or a folder of one tiff per timepoint.
 Merged frames are streamed into LABELS.zarr one at a time, so memory use stays
@@ -26,6 +26,13 @@ the blank inside of the embryo is removed from the cells; and nodes get
 membrane_boundary_signal. --spacing gives the physical voxel size for these
 steps (default: the tracks'). Best used on Cellpose masks segmented from the
 output of export_membrane_blend.py.
+
+--voronoi (with --raw) corrects the cells with a Voronoi partition of the
+embryo from the nuclei before the refinement: gaps take the cell of the nearest
+nucleus (not the nearest cell), and a cell part reaching more than
+--voronoi-margin um beyond its nucleus' Voronoi region goes to the Voronoi
+neighbour. The segmentation is kept within the margin, and the boundaries
+still move onto the membrane afterwards.
 """
 
 import argparse
@@ -48,6 +55,7 @@ from motile_tracker.membrane.io import (
     read_label_file,
     save_membrane_labels,
 )
+from motile_tracker.membrane.refine import RefineParams
 
 # Flush every line, so a log file is current while napari is still open.
 print = functools.partial(print, flush=True)  # noqa: A001
@@ -104,7 +112,20 @@ def main():
     )
     p.add_argument("--raw", type=Path, default=None, help="raw membrane image")
     p.add_argument("--spacing", default=None, help="z,y,x in um for --raw steps")
+    p.add_argument(
+        "--voronoi",
+        action="store_true",
+        help="with --raw: correct cells towards the Voronoi partition of the nuclei",
+    )
+    p.add_argument(
+        "--voronoi-margin",
+        type=float,
+        default=RefineParams.voronoi_margin_um,
+        help="um a cell may reach beyond its nucleus' Voronoi region",
+    )
     args = p.parse_args()
+    if args.voronoi and args.raw is None:
+        p.error("--voronoi needs --raw")
 
     params = MembraneMergeParams(
         min_nucleus_overlap=args.min_nucleus_overlap,
@@ -141,6 +162,8 @@ def main():
     )
     if raw is not None:
         print(f"refining on raw image {tuple(raw.shape)}, voxel {raw_spacing} um")
+        if args.voronoi:
+            print(f"Voronoi correction, margin {args.voronoi_margin} um")
 
     store = create_label_store(args.labels_zarr, seg_shape)
     t0 = time.time()
@@ -159,6 +182,9 @@ def main():
         keep_cavities_from=args.keep_cavities_from,
         raw=raw,
         raw_spacing=raw_spacing,
+        refine_params=RefineParams(
+            voronoi=args.voronoi, voronoi_margin_um=args.voronoi_margin
+        ),
     )
     add_membrane_features(tracks, feats)
     print("wrote", args.labels_zarr)
