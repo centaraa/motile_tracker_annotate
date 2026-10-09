@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .merge import MembraneMergeParams, merge_frame
+from .merge import (
+    QC_FROM_NUCLEUS,
+    MembraneMergeParams,
+    fill_within,
+    merge_frame,
+    split_region,
+)
 from .refine import (
     RefineParams,
     boundary_signal,
@@ -271,10 +277,42 @@ def _refine_frame(
     )
     r, n_sub, emb = raw[box], nuclei[box], embryo[box]
     score = membrane_score(r, n_sub, spacing, mitotic, sp, embryo=emb)
-    sub, _ = refine_boundaries(labels[box], score, n_sub, spacing, rp)
+    cav = raw_cavity(r, n_sub, spacing, emb, rp) if cavity else None
+    sub = labels[box].copy()
+    # A nucleus the segmentation gave no cell (e.g. a thin outer cell it
+    # missed) seeds its own cell from its nucleus.
+    # If its nucleus lies inside another cell, that cell is split between the
+    # two nuclei, as the merge does for a label holding several nuclei.
+    for n, rec in feats.items():
+        if rec["membrane_id"] != 0:
+            continue
+        own = n_sub == n
+        if not own.any():
+            continue
+        hosts = sub[own]
+        hosts = hosts[hosts > 0]
+        if hosts.size:
+            host = int(np.bincount(hosts).argmax())
+            region = sub == host
+            rbox = ndimage.find_objects(region.astype(np.uint8))[0]
+            if (n_sub[rbox][region[rbox]] == host).any():
+                split = split_region(region[rbox], n_sub[rbox], [host, n], spacing)
+                sub[rbox][region[rbox]] = split[region[rbox]]
+            else:
+                sub[own] = n
+        else:
+            sub[own] = n
+        rec.update(membrane_id=int(n), membrane_qc=QC_FROM_NUCLEUS)
+    # The embryo outline from the raw image covers what the segmentation
+    # left empty; every voxel in it (but not in the cavity) goes to the
+    # nearest cell before the boundaries move onto the membrane.
+    inside = emb if cav is None else emb & ~cav
+    if sub.any() and inside.any():
+        sub = fill_within(sub, inside | (sub > 0), spacing)
+    sub, _ = refine_boundaries(sub, score, n_sub, spacing, rp)
     sub, _ = drop_islands(sub, spacing)
-    if cavity:
-        sub[raw_cavity(r, n_sub, spacing, emb, rp)] = 0
+    if cav is not None:
+        sub[cav] = 0
     labels = labels.copy()
     labels[box] = sub
     signal = boundary_signal(sub, score)

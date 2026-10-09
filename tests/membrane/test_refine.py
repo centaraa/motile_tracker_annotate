@@ -255,3 +255,55 @@ def test_sym3_eigvals_matches_numpy():
         m[:, 0, 0], m[:, 1, 1], m[:, 2, 2], m[:, 0, 1], m[:, 0, 2], m[:, 1, 2]
     )
     np.testing.assert_allclose(got, ref, atol=1e-9)
+
+
+def test_embryo_from_raw_ignores_sparse_background_noise():
+    rng = np.random.default_rng(0)
+    raw = np.zeros((10, 60, 60), np.float32)
+    raw[:, 15:45, 15:45] = 100.0
+    noise = rng.random(raw.shape) < 0.02  # sparse non-zero background voxels
+    raw[noise & (raw == 0)] = 5.0
+    emb = embryo_from_raw(raw)
+    assert emb[5, 30, 30]
+    assert not emb[:, :10].any() and not emb[:, :, 50:].any()
+
+
+def test_nucleus_without_cell_gets_one_with_raw(solution_tracks_3d):
+    """Node 1's fragment is missing from the labels: with raw, it still gets a
+    cell, grown from its nucleus and the embryo outline of the raw image."""
+    membrane = np.zeros((2, 100, 100, 100), dtype=np.uint32)
+    membrane[1, 5:80, 30:70, 25:95] = 9  # frame 0 has no membrane label at all
+    raw = np.zeros(membrane.shape, np.float32)
+    raw[:, 20:85, 20:85, 20:85] = 60.0
+    _, plain = compute_membrane_features(solution_tracks_3d, membrane, max_frames=1)
+    merged, feats = compute_membrane_features(
+        solution_tracks_3d, membrane, raw=raw, max_frames=1
+    )
+    assert plain[1]["membrane_qc"] == "no_membrane"
+    assert feats[1]["membrane_qc"] == "from_nucleus"
+    assert feats[1]["membrane_id"] == 1
+    assert (merged[0][20:85, 20:85, 20:85] == 1).mean() > 0.95
+
+
+def test_nucleus_inside_other_cell_splits_it_with_raw(solution_tracks_3d):
+    """At t=1 the label covers all of nucleus 2 but under half of nucleus 3, so
+    only 2 seeds it and 3 gets no cell from the merge; with raw, 3's nucleus
+    lies inside 2's cell, which is then split between the two."""
+    membrane = np.zeros((2, 100, 100, 100), dtype=np.uint32)
+    membrane[0, 25:76, 25:76, 25:76] = 5
+    membrane[1, 5:85, 25:75, 46:95] = 9  # nucleus 3 spans x 30..61: ~48 % inside
+    raw = np.zeros(membrane.shape, np.float32)
+    raw[:, 5:85, 25:75, 25:95] = 60.0
+    _, plain = compute_membrane_features(
+        solution_tracks_3d, membrane, division_window=0, start_frame=1
+    )
+    merged, feats = compute_membrane_features(
+        solution_tracks_3d, membrane, raw=raw, division_window=0, start_frame=1
+    )
+    assert plain[3]["membrane_qc"] == "no_membrane"
+    assert feats[3]["membrane_qc"] == "from_nucleus"
+    assert (merged[0] == 2).any() and (merged[0] == 3).any()
+    # nucleus 3's own voxels belong to its cell
+    nuc3 = np.zeros(merged[0].shape, bool)
+    nuc3[45:76, 35:66, 30:61] = True
+    assert (merged[0][nuc3] == 3).mean() > 0.9

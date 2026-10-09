@@ -55,6 +55,8 @@ QC_SPLIT = "split"
 QC_DIVIDING = "dividing"
 QC_SHARED = "shared"  # several nuclei, one label (use_watershed_split=False)
 QC_NO_MEMBRANE = "no_membrane"
+# no cell from the segmentation; grown from its nucleus (raw-image refinement)
+QC_FROM_NUCLEUS = "from_nucleus"
 
 
 @dataclass

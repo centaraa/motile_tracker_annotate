@@ -49,10 +49,20 @@ class ScoreParams:
 def embryo_from_raw(raw: np.ndarray) -> np.ndarray:
     """The embryo as the filled, slightly closed non-zero raw signal, per slice.
 
-    Filling per z-slice keeps a cavity that opens towards the top or bottom of
-    the stack inside the embryo, which a 3D fill would leave out.
+    Deconvolved images can carry sparse non-zero noise outside the embryo
+    (about 2 % of the background voxels in Pos_23): a voxel only counts when
+    more than half of its surroundings (~1 z-slice, 4 pixels) is non-zero,
+    and only the largest connected region is kept. Filling per z-slice keeps
+    a cavity that opens towards the top or bottom of the stack inside the
+    embryo, which a 3D fill would leave out.
     """
-    sig = raw > 0
+    share = ndimage.gaussian_filter((raw > 0).astype(np.float32), (1, 4, 4))
+    sig = share > 0.5
+    lab, n = ndimage.label(sig)
+    if n > 1:
+        sizes = np.bincount(lab.ravel())
+        sizes[0] = 0
+        sig = lab == sizes.argmax()
     out = np.zeros(sig.shape, bool)
     for z in range(sig.shape[0]):
         if sig[z].any():
