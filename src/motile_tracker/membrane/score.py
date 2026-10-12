@@ -40,6 +40,15 @@ class ScoreParams:
     """Score percentile in the embryo that maps to 1."""
     mitotic_exclusion_um: float = 8.0
     """Blank the score this close to the chromatin of mitotic nuclei."""
+    mitotic_exclusion_frac: float = 0.0
+    """If > 0, blank instead within this fraction of the mitotic cell's
+    equivalent diameter, the cell being its nucleus' Voronoi region in the
+    embryo (and only there). Spindles shrink with the cells over the cleavage
+    divisions, nuclei barely do (Pos_23: about 12-15 um at 7 and at 84
+    cells), so a fixed distance is too short early and cuts neighbouring
+    membranes late."""
+    mitotic_keep_surface_um: float = 0.0
+    """Never blank this close to the embryo surface (keeps the outer membrane)."""
     mitotic_before: int = 3
     """Frames before a division in which a nucleus counts as mitotic."""
     mitotic_after: int = 2
@@ -51,6 +60,11 @@ class ScoreParams:
     embryo (0) and its interior (1); 0 keeps the whole non-zero region."""
     outline_close_um: float = 4.0
     """Embryo outline: ball (um) closing gaps in a dim outer membrane."""
+    map_nucleus_um: float = 1.0
+    """Membrane map: blank the nuclei and this far around them (the network
+    also marks the nuclear envelope)."""
+    map_floor: float = 0.05
+    """Membrane map: values below this are left out of the sheet filter."""
 
 
 def _nonzero_support(raw: np.ndarray) -> np.ndarray:
@@ -240,8 +254,8 @@ def membrane_score(
         raw: raw membrane image of one frame (or an embryo crop of it).
         nuclei: nuclei labels of the same region; values are node ids.
         spacing: voxel size (z, y, x) in um.
-        mitotic: node ids of mitotic nuclei; the score is blanked within
-            `params.mitotic_exclusion_um` of them.
+        mitotic: node ids of mitotic nuclei; the score is blanked around
+            them (`mitotic_blank`).
         params: score parameters.
         embryo: the embryo mask; computed from `raw` if not given.
     """
@@ -260,13 +274,94 @@ def membrane_score(
     else:
         lo, hi = 0.0, 1.0
     score = np.clip((score - lo) / max(float(hi - lo), 1e-9), 0, 1).astype(np.float32)
-    mitotic = list(mitotic)
-    if mitotic:
-        near = ndimage.distance_transform_edt(
-            ~np.isin(nuclei, mitotic), sampling=spacing
-        )
-        score[near < params.mitotic_exclusion_um] = 0
+    score[mitotic_blank(nuclei, mitotic, spacing, params, embryo)] = 0
     return score
+
+
+def mitotic_blank(
+    nuclei: np.ndarray,
+    mitotic: Iterable[int],
+    spacing,
+    params: ScoreParams | None = None,
+    embryo: np.ndarray | None = None,
+) -> np.ndarray:
+    """Where the spindle of mitotic nuclei may be: the voxels to blank.
+
+    Within `params.mitotic_exclusion_um` of the chromatin, or, with
+    `params.mitotic_exclusion_frac`, within that fraction of the cell's
+    equivalent diameter and only inside the nucleus' Voronoi region (all
+    nuclei, within `embryo`). The outer `params.mitotic_keep_surface_um` of
+    the embryo is never blanked.
+    """
+    params = params or ScoreParams()
+    spacing = tuple(float(s) for s in spacing)
+    mitotic = [int(m) for m in mitotic]
+    blank = np.zeros(nuclei.shape, bool)
+    present = np.isin(nuclei, mitotic)
+    if not present.any():
+        return blank
+    if params.mitotic_exclusion_frac <= 0:
+        near = ndimage.distance_transform_edt(~present, sampling=spacing)
+        blank = near < params.mitotic_exclusion_um
+    else:
+        dist, idx = ndimage.distance_transform_edt(
+            nuclei == 0, sampling=spacing, return_indices=True
+        )
+        owner = nuclei[tuple(idx)]
+        del idx
+        if embryo is not None:
+            owner = np.where(embryo | (nuclei > 0), owner, 0)
+        voxel = float(np.prod(spacing))
+        for m in mitotic:
+            region = owner == m
+            if not region.any():
+                continue
+            diameter = (6.0 * region.sum() * voxel / np.pi) ** (1 / 3)
+            blank |= region & (dist < params.mitotic_exclusion_frac * diameter)
+    if params.mitotic_keep_surface_um > 0 and embryo is not None:
+        # Padded, so an embryo touching the crop border has a surface there.
+        depth = ndimage.distance_transform_edt(np.pad(embryo, 1), sampling=spacing)[
+            (slice(1, -1),) * embryo.ndim
+        ]
+        blank &= depth > params.mitotic_keep_surface_um
+    return blank
+
+
+def map_score(
+    pmap: np.ndarray,
+    nuclei: np.ndarray,
+    spacing,
+    mitotic: Iterable[int] = (),
+    params: ScoreParams | None = None,
+    embryo: np.ndarray | None = None,
+) -> np.ndarray:
+    """Membrane score in [0, 1] from a predicted membrane map.
+
+    For a boundary map from a network (e.g. DestiNuc's `predict-membrane-map`)
+    resampled to the raw grid. The network also responds to the nuclear
+    envelope and, where it was trained on membrane-only images, to
+    microtubules; so the nuclei (plus `params.map_nucleus_um`) and the
+    spindle region of mitotic nuclei (`mitotic_blank`) are blanked, and the
+    map is weighted by the square root of a sheet filter on itself
+    (normalised to its 99.5th percentile in the embryo): membranes in the
+    map are thin sheets, the microtubule texture is not.
+    """
+    params = params or ScoreParams()
+    spacing = tuple(float(s) for s in spacing)
+    score = np.clip(np.asarray(pmap, np.float32), 0, 1)
+    if nuclei.any():
+        near = ndimage.distance_transform_edt(nuclei == 0, sampling=spacing)
+        score[near <= params.map_nucleus_um] = 0
+        del near
+    score[mitotic_blank(nuclei, mitotic, spacing, params, embryo)] = 0
+    where = score > params.map_floor
+    if not where.any():
+        return score
+    sheet = sheet_score(score, params.sheet_um, spacing, where=where)
+    inside = where if embryo is None else where & embryo
+    ref = float(np.percentile(sheet[inside], 99.5)) if inside.any() else 1.0
+    score *= np.sqrt(np.clip(sheet / max(ref, 1e-9), 0, 1))
+    return score.astype(np.float32)
 
 
 def blend_for_segmentation(

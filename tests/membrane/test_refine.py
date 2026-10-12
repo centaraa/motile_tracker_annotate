@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from scipy import ndimage
 
 from motile_tracker.membrane.features import (
     RAW_FEATURES,
@@ -19,7 +20,9 @@ from motile_tracker.membrane.score import (
     ScoreParams,
     blend_for_segmentation,
     embryo_from_raw,
+    map_score,
     membrane_score,
+    mitotic_blank,
     mitotic_nodes,
     sheet_score,
 )
@@ -379,3 +382,77 @@ def test_voronoi_gap_fill_stays_inside(solution_tracks_3d, raw_and_membrane):
         assert feats[n]["membrane_id"] == n
         assert (merged[0 if n == 1 else 1] == n).any()
     assert (merged[1][raw[1] == 0] == 0).all()
+
+
+# --- predicted membrane map -----------------------------------------------------
+
+
+def _one_nucleus(size):
+    nuclei = np.zeros((size, size, size), np.uint32)
+    c = size // 2
+    nuclei[c - 2 : c + 3, c - 2 : c + 3, c - 2 : c + 3] = 7
+    return nuclei, np.ones(nuclei.shape, bool), c
+
+
+def test_mitotic_blank_scales_with_cell_size():
+    params = ScoreParams(mitotic_exclusion_frac=0.2)
+    radii = []
+    for size in (30, 60):
+        nuclei, emb, c = _one_nucleus(size)
+        blank = mitotic_blank(nuclei, [7], ISO, params, emb)
+        radii.append(int(blank[c, c, c:].sum()))
+    # equivalent diameter of the cube: 1.24 x size; 0.2 of it beyond the
+    # nucleus (3 voxels from its centre to its surface)
+    assert radii[1] - 3 > 1.7 * (radii[0] - 3)
+    fixed = mitotic_blank(*_one_nucleus(60)[:1], [7], ISO, ScoreParams())
+    assert fixed[30, 30, 30 + 2 + 7] and not fixed[30, 30, 30 + 2 + 9]
+
+
+def test_mitotic_blank_stays_in_own_region_and_off_surface():
+    nuclei = np.zeros((20, 20, 60), np.uint32)
+    nuclei[9:11, 9:11, 4:6] = 1  # mitotic, near the left surface
+    nuclei[9:11, 9:11, 50:52] = 2
+    emb = np.ones(nuclei.shape, bool)
+    params = ScoreParams(mitotic_exclusion_frac=1.0, mitotic_keep_surface_um=2.0)
+    blank = mitotic_blank(nuclei, [1], ISO, params, emb)
+    assert blank[10, 10, 10]
+    assert not blank[10, 10, 30:].any()  # beyond the Voronoi plane (x = 28)
+    assert not blank[10, 10, :2].any()  # outer 2 um of the embryo
+
+
+def test_map_score_keeps_sheets_and_drops_nuclei_and_texture():
+    rng = np.random.default_rng(0)
+    pmap = np.zeros((30, 40, 40), np.float32)
+    pmap[:, :, 20] = 1.0  # a membrane
+    blobs = ndimage.gaussian_filter(rng.random(pmap.shape), 1.5)
+    pmap[:, :, :12] = (blobs[:, :, :12] > np.percentile(blobs, 80)) * 0.8  # texture
+    nuclei = np.zeros(pmap.shape, np.uint32)
+    nuclei[12:18, 15:25, 30:36] = 3
+    pmap[nuclei > 0] = 1.0
+    s = map_score(pmap, nuclei, ISO)
+    assert s[15, 20, 20] > 0.5
+    assert s[nuclei > 0].max() == 0
+    assert s[:, :, :12].mean() < 0.8 * pmap[:, :, :12].mean()
+
+
+def test_compute_with_membrane_map_on_other_grid(solution_tracks_3d, raw_and_membrane):
+    membrane, raw = raw_and_membrane
+    pmap = np.zeros((2, 50, 50, 50), np.uint8)  # half resolution, uint8
+    pmap[1, :, :, 29] = 255  # a membrane at x = 58 on the raw grid
+    sp = ScoreParams(mitotic_before=0, mitotic_after=0)
+    on_map, feats = compute_membrane_features(
+        solution_tracks_3d,
+        membrane,
+        raw=raw,
+        score_params=sp,
+        membrane_map=pmap,
+        division_window=0,
+    )
+    plain, _ = compute_membrane_features(
+        solution_tracks_3d, membrane, raw=raw, score_params=sp, division_window=0
+    )
+    assert set(np.unique(on_map[1])) == {0, 2, 3}
+    assert not np.array_equal(on_map[1], plain[1])
+    assert feats[2]["membrane_boundary_signal"] > 0
+    with pytest.raises(ValueError, match="needs raw"):
+        compute_membrane_features(solution_tracks_3d, membrane, membrane_map=pmap)

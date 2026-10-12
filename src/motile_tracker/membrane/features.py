@@ -29,7 +29,13 @@ from .refine import (
     refine_boundaries,
     voronoi_correct,
 )
-from .score import ScoreParams, embryo_from_raw, membrane_score, mitotic_nodes
+from .score import (
+    ScoreParams,
+    embryo_from_raw,
+    map_score,
+    membrane_score,
+    mitotic_nodes,
+)
 
 if TYPE_CHECKING:
     from funtracks.data_model import Tracks
@@ -106,6 +112,7 @@ def compute_membrane_features(
     raw_spacing=None,
     score_params: ScoreParams | None = None,
     refine_params: RefineParams | None = None,
+    membrane_map=None,
 ) -> tuple[np.ndarray, dict[int, dict]]:
     """Merge the membrane labels of every frame onto the tracked nuclei.
 
@@ -148,6 +155,11 @@ def compute_membrane_features(
             steps. Default: the tracks' scale. The merge itself always uses
             the tracks' scale.
         score_params, refine_params: Parameters of those steps.
+        membrane_map: With `raw`, a predicted membrane map per frame (t, z,
+            y, x) in [0, 1] (or uint8 0-255), on any grid covering the same
+            volume (e.g. isotropic, from DestiNuc's `predict-membrane-map`).
+            Each frame is resampled to the raw grid and replaces the sheet
+            score in the refinement (`score.map_score`).
 
     Returns:
         The merged labels (`out` if given; values are node ids) and per-node
@@ -177,6 +189,13 @@ def compute_membrane_features(
             f"Raw image has shape {tuple(raw.shape)}, the nuclei segmentation "
             f"{seg_shape}."
         )
+    if membrane_map is not None:
+        if raw is None:
+            raise ValueError("membrane_map needs raw.")
+        if membrane_map.shape[0] < stop:
+            raise ValueError(
+                f"Membrane map has {membrane_map.shape[0]} frames, need {stop}."
+            )
     raw_spacing = tuple(float(s) for s in (raw_spacing or spacing))
     score_params = score_params or ScoreParams()
     refine_params = refine_params or RefineParams()
@@ -213,6 +232,7 @@ def compute_membrane_features(
                 score_params,
                 refine_params,
                 late,
+                None if membrane_map is None else np.asarray(membrane_map[t]),
             )
         return t, np.asarray(membrane[t]), nuclei, spacing, p, pairs, refine
 
@@ -260,8 +280,36 @@ def _merge_job(args: tuple) -> tuple[int, np.ndarray, dict]:
     return t, labels, feats
 
 
+def _fit_map(pmap: np.ndarray, shape) -> np.ndarray:
+    """A membrane map resampled (linear) to `shape`, as float32 in [0, 1]."""
+    from scipy import ndimage
+
+    pmap = np.asarray(pmap)
+    scale = 255.0 if np.issubdtype(pmap.dtype, np.integer) else 1.0
+    pmap = pmap.astype(np.float32) / scale
+    if pmap.shape != tuple(shape):
+        out = ndimage.zoom(
+            pmap, [o / i for o, i in zip(shape, pmap.shape, strict=True)], order=1
+        )
+        fitted = np.zeros(shape, np.float32)
+        sl = tuple(slice(0, min(a, b)) for a, b in zip(out.shape, shape, strict=True))
+        fitted[sl] = out[sl]
+        pmap = fitted
+    return np.clip(pmap, 0, 1)
+
+
 def _refine_frame(
-    labels, feats, nuclei, merge_spacing, raw, spacing, mitotic, sp, rp, cavity
+    labels,
+    feats,
+    nuclei,
+    merge_spacing,
+    raw,
+    spacing,
+    mitotic,
+    sp,
+    rp,
+    cavity,
+    pmap=None,
 ) -> np.ndarray:
     """Refine merged labels on the raw image; updates `feats` in place."""
     from scipy import ndimage
@@ -277,7 +325,11 @@ def _refine_frame(
         )
     )
     r, n_sub, emb = raw[box], nuclei[box], embryo[box]
-    score = membrane_score(r, n_sub, spacing, mitotic, sp, embryo=emb)
+    if pmap is None:
+        score = membrane_score(r, n_sub, spacing, mitotic, sp, embryo=emb)
+    else:
+        pm = _fit_map(pmap, raw.shape)[box]
+        score = map_score(pm, n_sub, spacing, mitotic, sp, embryo=emb)
     cav = raw_cavity(r, n_sub, spacing, emb, rp) if cavity else None
     sub = labels[box].copy()
     # A nucleus the segmentation gave no cell (e.g. a thin outer cell it

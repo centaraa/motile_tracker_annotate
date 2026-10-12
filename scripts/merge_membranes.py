@@ -7,7 +7,8 @@ Usage:
         [--min-contact-area 0] [--max-dist inf] [--min-cell-volume 0]
         [--division-window 1] [--no-split] [--no-embedded] [--no-fill]
         [--outline closed|convex_hull] [--closing-radius 6] [--keep-cavities]
-        [--raw RAW --spacing Z,Y,X [--voronoi [--voronoi-margin 3]]]
+        [--raw RAW --spacing Z,Y,X [--voronoi [--voronoi-margin 3]]
+         [--membrane-map MAP [--mitotic-exclusion-frac 0.2]]]
 
 MEMBRANE is a zarr array, a tiff, or a folder of one tiff per timepoint.
 Merged frames are streamed into LABELS.zarr one at a time, so memory use stays
@@ -33,6 +34,14 @@ nucleus (not the nearest cell), and a cell part reaching more than
 --voronoi-margin um beyond its nucleus' Voronoi region goes to the Voronoi
 neighbour. The segmentation is kept within the margin, and the boundaries
 still move onto the membrane afterwards.
+
+--membrane-map (with --raw) is a folder with a predicted membrane map per
+timepoint (e.g. from DestiNuc's predict-membrane-map, any grid covering the
+same volume);
+it replaces the sheet-filter score in the refinement. The nuclei are blanked
+in it, and so is the spindle region of mitotic nuclei: within
+--mitotic-exclusion-frac of the cell's equivalent diameter (the nucleus'
+Voronoi region), never in the outer 2 um of the embryo.
 """
 
 import argparse
@@ -56,6 +65,7 @@ from motile_tracker.membrane.io import (
     save_membrane_labels,
 )
 from motile_tracker.membrane.refine import RefineParams
+from motile_tracker.membrane.score import ScoreParams
 
 # Flush every line, so a log file is current while napari is still open.
 print = functools.partial(print, flush=True)  # noqa: A001
@@ -123,9 +133,24 @@ def main():
         default=RefineParams.voronoi_margin_um,
         help="um a cell may reach beyond its nucleus' Voronoi region",
     )
+    p.add_argument(
+        "--membrane-map",
+        type=Path,
+        default=None,
+        help="with --raw: predicted membrane maps, one tiff per timepoint",
+    )
+    p.add_argument(
+        "--mitotic-exclusion-frac",
+        type=float,
+        default=0.2,
+        help="with --membrane-map: blank radius around mitotic nuclei as a "
+        "fraction of the cell's equivalent diameter",
+    )
     args = p.parse_args()
     if args.voronoi and args.raw is None:
         p.error("--voronoi needs --raw")
+    if args.membrane_map is not None and args.raw is None:
+        p.error("--membrane-map needs --raw")
 
     params = MembraneMergeParams(
         min_nucleus_overlap=args.min_nucleus_overlap,
@@ -164,6 +189,18 @@ def main():
         print(f"refining on raw image {tuple(raw.shape)}, voxel {raw_spacing} um")
         if args.voronoi:
             print(f"Voronoi correction, margin {args.voronoi_margin} um")
+    membrane_map = None
+    score_params = ScoreParams()
+    if args.membrane_map is not None:
+        membrane_map = read_label_file(args.membrane_map)
+        score_params = ScoreParams(
+            mitotic_exclusion_frac=args.mitotic_exclusion_frac,
+            mitotic_keep_surface_um=2.0,
+        )
+        print(
+            f"membrane map {tuple(membrane_map.shape)}, mitotic blanking "
+            f"{args.mitotic_exclusion_frac} x cell diameter"
+        )
 
     store = create_label_store(args.labels_zarr, seg_shape)
     t0 = time.time()
@@ -185,6 +222,8 @@ def main():
         refine_params=RefineParams(
             voronoi=args.voronoi, voronoi_margin_um=args.voronoi_margin
         ),
+        score_params=score_params,
+        membrane_map=membrane_map,
     )
     add_membrane_features(tracks, feats)
     print("wrote", args.labels_zarr)

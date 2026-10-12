@@ -144,6 +144,16 @@ nearest nucleus, and a cell part reaching more than `--voronoi-margin` µm
 the margin the masks are kept, and the boundaries still move onto the membrane
 afterwards; this helps where the masks leave large parts of the embryo empty.
 
+`--membrane-map MAP` replaces the sheet-filter membrane signal with a membrane
+map predicted by a 3D U-Net, one TIFF per timepoint on any grid covering the
+same volume (e.g. DestiNuc's `predict-membrane-map` with the base model of
+Fabrèges et al. 2024, Science 386, eadh1145; weights CC BY-NC-SA 4.0, not part
+of this repository). The nuclei are blanked in the map (the network also marks
+the nuclear envelope), and so is the spindle region of mitotic nuclei: within
+`--mitotic-exclusion-frac` (default 0.2) of the cell's equivalent diameter,
+the cell being the nucleus' Voronoi region, but never in the outer 2 µm of the
+embryo. A sheet filter on the map weakens the microtubule texture.
+
 ## Package the application into an executable and create the installer
 
 Tagging any branch will automatically trigger the deploy.yml workflow,
