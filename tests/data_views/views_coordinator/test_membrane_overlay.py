@@ -5,10 +5,6 @@ import pytest
 
 from motile_tracker.data_views.views_coordinator.tracks_viewer import TracksViewer
 from motile_tracker.import_export.geff_io import write_geff_over
-from motile_tracker.membrane.features import (
-    add_membrane_features,
-    compute_membrane_features,
-)
 from motile_tracker.membrane.io import (
     MEMBRANE_ARRAY,
     load_membrane_labels,
@@ -24,11 +20,23 @@ def clear_viewer_layers(viewer):
 
 @pytest.fixture
 def membrane_geff(solution_tracks_3d, tmp_path):
-    membrane = np.zeros((2, 100, 100, 100), dtype=np.uint32)
-    membrane[0, 25:76, 25:76, 25:76] = 5
-    membrane[1, 5:80, 30:70, 25:95] = 9
-    merged, feats = compute_membrane_features(solution_tracks_3d, membrane)
-    add_membrane_features(solution_tracks_3d, feats)
+    """A geff as DestiNuc's merge-membranes writes it: one cell per nucleus
+    (value = node id) in membrane_labels, and a membrane_id node feature."""
+    merged = np.zeros((2, 100, 100, 100), dtype=np.uint32)
+    merged[0, 25:76, 25:76, 25:76] = 1
+    merged[1, 5:80, 30:70, 25:60] = 3
+    merged[1, 5:80, 30:70, 60:95] = 2
+    solution_tracks_3d.add_feature(
+        "membrane_id",
+        {
+            "feature_type": "node",
+            "value_type": "int",
+            "num_values": 1,
+            "display_name": "Membrane ID",
+            "default_value": 0,
+        },
+    )
+    solution_tracks_3d._set_nodes_attr([1, 2, 3], "membrane_id", [1, 2, 3])
     path = tmp_path / "with_membrane.geff"
     write_geff_over(solution_tracks_3d, path)
     save_membrane_labels(path, merged)
