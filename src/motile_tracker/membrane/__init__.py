@@ -1,5 +1,6 @@
-"""Merge over/under-segmented membrane labels into one cell per tracked nucleus."""
+"""Membrane cell labels kept inside a geff store (written by DestiNuc).
 
-from .merge import MembraneMergeParams, MergeResult, merge_frame
-
-__all__ = ["MembraneMergeParams", "MergeResult", "merge_frame"]
+The merge of membrane segmentations onto the tracked nuclei lives in DestiNuc
+(destinuc.membrane); motile_tracker reads, shows and re-saves its labels via
+`motile_tracker.membrane.io`.
+"""

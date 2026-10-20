@@ -63,41 +63,28 @@ track objects in napari Labels or Points layers. For details, please read the
 
 If you are new to using motile-tracker, you can follow this [tutorial](./assets/motile-tracker_tutorial.pdf) to learn the basics.
 
-## Membrane labels
+## Membrane labels and other analysis results
 
-Membrane segmentations are typically over- and under-segmented. Once the
-nuclei tracks are corrected, `scripts/merge_membranes.py` turns raw membrane
-labels into one cell per tracked nucleus, using only the labels (no raw
-image). Run it as the last step, after nuclei correction: later edits to the
-nuclei do not update the membrane results, so rerun it after them.
+The analysis of the tracked embryos runs headless in
+[DestiNuc](https://github.com/centaraa/DestiNuc) (`pixi run -e analysis ...`):
+`merge-membranes` turns membrane segmentations into one cell per tracked
+nucleus, `spindle-features` measures mitotic spindles. They read the corrected
+tracks (geff) and write a new geff; motile_tracker only shows and saves what
+they wrote. Load the output via "Tracks (geff)".
 
-```bash
-uv run python scripts/merge_membranes.py TRACKS MEMBRANE LABELS.zarr --out-geff OUT.geff --workers 8
-```
+What motile_tracker reads from such a geff (the contract with DestiNuc):
 
-- `TRACKS`: the corrected tracks, a geff store or a motile run folder.
-- `MEMBRANE`: raw membrane labels with the same shape as the nuclei
-  segmentation, as a zarr array, a tiff or a folder of one tiff per timepoint.
-- `LABELS.zarr` receives the merged labels frame by frame; `OUT.geff` gets the
-  tracks plus a copy of them. Load `OUT.geff` via "Tracks (geff)" to see a
-  read-only `<name>_membrane` overlay, coloured like the nuclei.
-
-Per frame, fragments are merged along their shared surface, never across two
-nuclei; fragments enclosed by one cell are absorbed; fragments lying between
-cells are divided among them; a label holding several nuclei (including cells
-in ana-/telophase) is split between them by distance; and every empty voxel
-inside the embryo outline goes to its nearest cell. Each node gets the
-features `membrane_id`, `membrane_volume`, `membrane_n_fragments`,
-`membrane_merge_score`, `membrane_n_nuclei` and `membrane_qc` (`ok`, `split`,
-`dividing` for sisters right after a division, `no_membrane`), which show in
-the table and are written to CSV exports.
-
-Useful options: `--start-frame`/`--max-frames` to try a range, `--view` to
-inspect the result in napari, `--keep-cavities-from FRAME` to leave enclosed
-cavities such as a blastocoel empty from FRAME on, and `--closing-radius` for
-the width of inlets the embryo outline closes. Lengths are in µm, using the
-voxel size stored with the tracks (voxels if none is stored). Each worker
-needs about 2 to 3 GB of memory. `--help` lists all options.
+- **Node features**: any node property is loaded as a feature, shown in the
+  table and written to CSV exports, e.g. `membrane_id`, `membrane_volume`
+  (voxels), `membrane_qc`, `membrane_boundary_signal`, and the `spindle_*`
+  features (µm).
+- **Membrane cells**: a uint32 zarr array `membrane_labels` inside the geff
+  store, next to `nodes`/`edges`, with the shape of the nuclei segmentation
+  (t, z, y, x); a cell's value is the node id of its nucleus. It is registered
+  in the geff metadata under `related_objects` (`type: labels`,
+  `path: membrane_labels`, `label_prop: membrane_id`). motile_tracker shows it as
+  a read-only `<name>_membrane` overlay coloured like the nuclei, and keeps it
+  when the tracks are saved again (`motile_tracker.membrane.io`).
 
 ## Package the application into an executable and create the installer
 
